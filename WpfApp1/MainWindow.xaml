@@ -47,11 +47,13 @@
                                           ItemsSource="{Binding SerialSettings.AvailablePorts}"
                                           SelectedItem="{Binding SerialSettings.SelectedPort}"
                                           DisplayMemberPath="DisplayName"
+                                          mah:ControlsHelper.CornerRadius="6"
                                           VerticalContentAlignment="Center" />
                                 <TextBlock Grid.Row="1" Text="波特率" VerticalAlignment="Center" />
                                 <ComboBox Grid.Row="1" Grid.Column="1"
                                           ItemsSource="{Binding SerialSettings.BaudRates}"
                                           SelectedItem="{Binding SerialSettings.SelectedBaudRate}"
+                                          mah:ControlsHelper.CornerRadius="6"
                                           VerticalContentAlignment="Center" />
                             </Grid>
 
@@ -69,15 +71,15 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="数据位" VerticalAlignment="Center" />
-                                <ComboBox Grid.Column="1" ItemsSource="{Binding SerialSettings.DataBitOptions}" SelectedItem="{Binding SerialSettings.SelectedDataBits}" VerticalContentAlignment="Center" />
+                                <ComboBox Grid.Column="1" ItemsSource="{Binding SerialSettings.DataBitOptions}" SelectedItem="{Binding SerialSettings.SelectedDataBits}" mah:ControlsHelper.CornerRadius="6" VerticalContentAlignment="Center" />
                                 <TextBlock Grid.Row="1" Text="校验位" VerticalAlignment="Center" />
-                                <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding SerialSettings.ParityOptions}" SelectedItem="{Binding SerialSettings.SelectedParity}" VerticalContentAlignment="Center" />
+                                <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding SerialSettings.ParityOptions}" SelectedItem="{Binding SerialSettings.SelectedParity}" mah:ControlsHelper.CornerRadius="6" VerticalContentAlignment="Center" />
                                 <TextBlock Grid.Row="2" Text="停止位" VerticalAlignment="Center" />
-                                <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding SerialSettings.StopBitOptions}" SelectedItem="{Binding SerialSettings.SelectedStopBits}" VerticalContentAlignment="Center" />
+                                <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding SerialSettings.StopBitOptions}" SelectedItem="{Binding SerialSettings.SelectedStopBits}" mah:ControlsHelper.CornerRadius="6" VerticalContentAlignment="Center" />
                                 <TextBlock Grid.Row="3" Text="读超时 (ms)" VerticalAlignment="Center" />
-                                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding SerialSettings.ReadTimeout, UpdateSourceTrigger=PropertyChanged}" VerticalContentAlignment="Center" />
+                                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding SerialSettings.ReadTimeout, UpdateSourceTrigger=PropertyChanged}" mah:ControlsHelper.CornerRadius="6" VerticalContentAlignment="Center" />
                                 <TextBlock Grid.Row="4" Text="写超时 (ms)" VerticalAlignment="Center" />
-                                <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding SerialSettings.WriteTimeout, UpdateSourceTrigger=PropertyChanged}" VerticalContentAlignment="Center" />
+                                <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding SerialSettings.WriteTimeout, UpdateSourceTrigger=PropertyChanged}" mah:ControlsHelper.CornerRadius="6" VerticalContentAlignment="Center" />
                             </Grid>
                             <TextBlock Text="日常使用通常只需选择串口和波特率。高级参数应与设备通信协议保持一致。"
                                        Margin="0,14,0,0"
@@ -92,8 +94,8 @@
                     </ScrollViewer>
 
                     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Content="取消" Command="{Binding SerialSettings.CloseCommand}" MinWidth="76" Margin="0,0,8,0" />
-                        <Button Content="应用设置" Command="{Binding SerialSettings.ApplyCommand}" MinWidth="88" Background="#0078D4" BorderBrush="#0078D4" Foreground="White" />
+                        <Button Content="取消" Command="{Binding SerialSettings.CloseCommand}" MinWidth="76" Margin="0,0,8,0" mah:ControlsHelper.CornerRadius="6" />
+                        <Button Content="应用设置" Command="{Binding SerialSettings.ApplyCommand}" MinWidth="88" Background="#0078D4" BorderBrush="#0078D4" Foreground="White" mah:ControlsHelper.CornerRadius="6" />
                     </StackPanel>
                 </Grid>
             </mah:Flyout>
