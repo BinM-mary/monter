@@ -22,8 +22,9 @@
                            Grid.Row="0"
                            IsPaneOpen="True"
                            DisplayMode="CompactInline"
-                           HamburgerWidth="48"
-                           CompactPaneLength="48"
+                           HamburgerWidth="35"
+                           CompactPaneLength="35"
+                           MinimumOpenPaneLength="35"
                            OpenPaneLength="190"
                            PanePlacement="Left"
                            PaneBackground="#FAFAFA"
@@ -56,7 +57,7 @@
                 <DataTemplate x:Key="MenuItemTemplate">
                     <Grid Height="44">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="48" />
+                            <ColumnDefinition Width="35" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="{Binding Glyph}"
