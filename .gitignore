@@ -1,0 +1,12 @@
+# Visual Studio 用户与缓存文件
+.vs/
+*.user
+*.suo
+
+# .NET 编译输出
+**/bin/
+**/obj/
+
+# 本地日志与临时文件
+*.log
+*.tmp
