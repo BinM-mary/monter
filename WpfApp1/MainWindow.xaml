@@ -12,6 +12,93 @@
                  Height="450"
                  Width="800"
                  WindowState="Maximized">
+    <mah:MetroWindow.Flyouts>
+        <mah:FlyoutsControl>
+            <mah:Flyout Header="串口设置"
+                        Position="Right"
+                        Width="330"
+                        Height="440"
+                        VerticalAlignment="Center"
+                        Margin="0,0,12,0"
+                        Theme="Light"
+                        IsModal="True"
+                        IsOpen="{Binding SerialSettings.IsFlyoutOpen, Mode=TwoWay}">
+                <Grid Margin="14,12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="12" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <TextBlock Text="基本设置" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,10" />
+                            <Grid Margin="0,0,0,20">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="34" />
+                                    <RowDefinition Height="34" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="76" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="串口" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1"
+                                          ItemsSource="{Binding SerialSettings.AvailablePorts}"
+                                          SelectedItem="{Binding SerialSettings.SelectedPort}"
+                                          DisplayMemberPath="DisplayName"
+                                          VerticalContentAlignment="Center" />
+                                <TextBlock Grid.Row="1" Text="波特率" VerticalAlignment="Center" />
+                                <ComboBox Grid.Row="1" Grid.Column="1"
+                                          ItemsSource="{Binding SerialSettings.BaudRates}"
+                                          SelectedItem="{Binding SerialSettings.SelectedBaudRate}"
+                                          VerticalContentAlignment="Center" />
+                            </Grid>
+
+                            <TextBlock Text="高级参数" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,10" />
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="34" />
+                                    <RowDefinition Height="34" />
+                                    <RowDefinition Height="34" />
+                                    <RowDefinition Height="34" />
+                                    <RowDefinition Height="34" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="76" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="数据位" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" ItemsSource="{Binding SerialSettings.DataBitOptions}" SelectedItem="{Binding SerialSettings.SelectedDataBits}" VerticalContentAlignment="Center" />
+                                <TextBlock Grid.Row="1" Text="校验位" VerticalAlignment="Center" />
+                                <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding SerialSettings.ParityOptions}" SelectedItem="{Binding SerialSettings.SelectedParity}" VerticalContentAlignment="Center" />
+                                <TextBlock Grid.Row="2" Text="停止位" VerticalAlignment="Center" />
+                                <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding SerialSettings.StopBitOptions}" SelectedItem="{Binding SerialSettings.SelectedStopBits}" VerticalContentAlignment="Center" />
+                                <TextBlock Grid.Row="3" Text="读超时 (ms)" VerticalAlignment="Center" />
+                                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding SerialSettings.ReadTimeout, UpdateSourceTrigger=PropertyChanged}" VerticalContentAlignment="Center" />
+                                <TextBlock Grid.Row="4" Text="写超时 (ms)" VerticalAlignment="Center" />
+                                <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding SerialSettings.WriteTimeout, UpdateSourceTrigger=PropertyChanged}" VerticalContentAlignment="Center" />
+                            </Grid>
+                            <TextBlock Text="日常使用通常只需选择串口和波特率。高级参数应与设备通信协议保持一致。"
+                                       Margin="0,14,0,0"
+                                       FontSize="12"
+                                       Foreground="#6B6B6B"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding SerialSettings.ValidationMessage}"
+                                       Margin="0,8,0,0"
+                                       Foreground="#C42B1C"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Content="取消" Command="{Binding SerialSettings.CloseCommand}" MinWidth="76" Margin="0,0,8,0" />
+                        <Button Content="应用设置" Command="{Binding SerialSettings.ApplyCommand}" MinWidth="88" Background="#0078D4" BorderBrush="#0078D4" Foreground="White" />
+                    </StackPanel>
+                </Grid>
+            </mah:Flyout>
+        </mah:FlyoutsControl>
+    </mah:MetroWindow.Flyouts>
     <Grid Background="#F3F3F3">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
@@ -132,10 +219,19 @@
         <Border Grid.Row="1" Background="#FFFFFF" BorderBrush="#D7D7D7" BorderThickness="0,1,0,0">
             <DockPanel Margin="14,0">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Ellipse Width="8" Height="8" Fill="#C42B1C" VerticalAlignment="Center" />
-                    <TextBlock Text="设备未连接" Margin="7,0,12,0" FontSize="12" Foreground="#505050" VerticalAlignment="Center" />
+                    <Ellipse Width="8" Height="8" VerticalAlignment="Center">
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Fill" Value="#C42B1C" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SerialSettings.IsConnected}" Value="True"><Setter Property="Fill" Value="#107C10" /></DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                    <TextBlock Text="{Binding SerialSettings.ConnectionStatusText}" Margin="7,0,12,0" FontSize="12" Foreground="#505050" VerticalAlignment="Center" />
                     <Border Width="1" Height="14" Background="#D7D7D7" VerticalAlignment="Center" />
-                    <TextBlock Text="COM3 · 115200 · 8N1" Margin="12,0" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding SerialSettings.ConnectionPortDisplayText}" Margin="12,0" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" />
                     <Border Width="1" Height="14" Background="#D7D7D7" VerticalAlignment="Center" />
                     <TextBlock Text="报文输出窗口" Margin="12,0" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" />
                     <Border Width="1" Height="14" Background="#D7D7D7" VerticalAlignment="Center" />

@@ -11,6 +11,9 @@
         <Style x:Key="FieldControlStyle" TargetType="Control"><Setter Property="Height" Value="30" /><Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI" /><Setter Property="FontSize" Value="13" /><Setter Property="VerticalContentAlignment" Value="Center" /></Style>
         <Style x:Key="StatusLabelStyle" TargetType="TextBlock"><Setter Property="FontFamily" Value="Microsoft YaHei UI" /><Setter Property="FontSize" Value="12" /><Setter Property="Foreground" Value="#6B6B6B" /><Setter Property="VerticalAlignment" Value="Center" /></Style>
         <Style x:Key="StatusValueStyle" TargetType="TextBlock"><Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI" /><Setter Property="FontSize" Value="13" /><Setter Property="Foreground" Value="#202020" /><Setter Property="VerticalAlignment" Value="Center" /></Style>
+        <Style x:Key="ConnectionChipStyle" TargetType="Border"><Setter Property="Height" Value="32" /><Setter Property="Background" Value="#F2F2F2" /><Setter Property="BorderBrush" Value="#D5D5D5" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="3" /><Setter Property="Padding" Value="10,0" /><Setter Property="Margin" Value="0,0,12,0" /></Style>
+        <Style x:Key="ConnectionIndicatorStyle" TargetType="Ellipse"><Setter Property="Width" Value="8" /><Setter Property="Height" Value="8" /><Setter Property="Fill" Value="#C42B1C" /><Setter Property="VerticalAlignment" Value="Center" /><Style.Triggers><DataTrigger Binding="{Binding SerialSettings.IsConnected}" Value="True"><Setter Property="Fill" Value="#107C10" /></DataTrigger></Style.Triggers></Style>
+        <Style x:Key="ConnectionStatusTextStyle" TargetType="TextBlock"><Setter Property="FontSize" Value="12" /><Setter Property="Foreground" Value="#9E251A" /><Setter Property="VerticalAlignment" Value="Center" /><Setter Property="Margin" Value="7,0,10,0" /><Style.Triggers><DataTrigger Binding="{Binding SerialSettings.IsConnected}" Value="True"><Setter Property="Foreground" Value="#107C10" /></DataTrigger></Style.Triggers></Style>
     </UserControl.Resources>
 
     <Grid Background="#F3F3F3">
@@ -25,10 +28,17 @@
                             <TextBlock Text="Actuator Control &amp; Debug" FontFamily="Segoe UI" FontSize="12" Foreground="#6B6B6B" Margin="0,2,0,0" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Border Background="#FFF4F3" BorderBrush="#F0C6C1" BorderThickness="1" CornerRadius="12" Padding="9,3" Margin="0,0,12,0"><StackPanel Orientation="Horizontal"><Ellipse Width="7" Height="7" Fill="#C42B1C" VerticalAlignment="Center" /><TextBlock Text="未连接" FontSize="12" Foreground="#9E251A" Margin="6,0,0,0" /></StackPanel></Border>
-                            <TextBlock Text="COM3 · 115200" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" Margin="0,0,14,0" />
-                            <Button Content="串口设置" Style="{StaticResource ActionButtonStyle}" Margin="0,0,8,0" />
-                            <Button Content="连接设备" Style="{StaticResource PrimaryButtonStyle}" />
+                            <Border Style="{StaticResource ConnectionChipStyle}">
+                                <Grid VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="1" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <Ellipse Style="{StaticResource ConnectionIndicatorStyle}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding SerialSettings.ConnectionStatusText}" Style="{StaticResource ConnectionStatusTextStyle}" />
+                                    <Border Grid.Column="2" Background="#D2D2D2" Height="16" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="3" Text="{Binding SerialSettings.ConnectionPortDisplayText}" FontSize="12" Foreground="#5C5C5C" VerticalAlignment="Center" Margin="10,0,0,0" />
+                                </Grid>
+                            </Border>
+                            <Button Content="串口设置" Command="{Binding SerialSettings.OpenCommand}" Style="{StaticResource ActionButtonStyle}" Margin="0,0,8,0" />
+                            <Button Content="{Binding SerialSettings.ConnectionButtonText}" Command="{Binding SerialSettings.ToggleConnectionCommand}" Style="{StaticResource PrimaryButtonStyle}" />
                         </StackPanel>
                     </Grid>
                 </Border>
