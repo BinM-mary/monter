@@ -8,10 +8,25 @@
                  xmlns:views="clr-namespace:WpfApp1.Views"
                  xmlns:local="clr-namespace:WpfApp1"
                  mc:Ignorable="d"
-                 Title="电机调试工具"
+                 Title="Holychip Motor Studio"
                  Height="450"
                  Width="800"
                  WindowState="Maximized">
+    <mah:MetroWindow.TitleTemplate>
+        <DataTemplate>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Image Source="/WpfApp1;component/Resources/logo-transparent.png"
+                       Width="22"
+                       Height="22"
+                       Stretch="Uniform"
+                       Margin="0,0,8,0" />
+                <TextBlock Text="{Binding}"
+                           FontFamily="Microsoft YaHei UI"
+                           FontSize="14"
+                           VerticalAlignment="Center" />
+            </StackPanel>
+        </DataTemplate>
+    </mah:MetroWindow.TitleTemplate>
     <mah:MetroWindow.Flyouts>
         <mah:FlyoutsControl>
             <mah:Flyout Header="串口设置"
@@ -111,9 +126,9 @@
                            Grid.Row="0"
                            IsPaneOpen="True"
                            DisplayMode="CompactInline"
-                           HamburgerWidth="35"
-                           CompactPaneLength="35"
-                           MinimumOpenPaneLength="35"
+                           HamburgerWidth="30"
+                           CompactPaneLength="30"
+                           MinimumOpenPaneLength="30"
                            OpenPaneLength="190"
                            PanePlacement="Left"
                            PaneBackground="#FAFAFA"
@@ -146,7 +161,7 @@
                 <DataTemplate x:Key="MenuItemTemplate">
                     <Grid Height="44">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="35" />
+                            <ColumnDefinition Width="30" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="{Binding Glyph}"
