@@ -114,6 +114,69 @@
                     </StackPanel>
                 </Grid>
             </mah:Flyout>
+            <mah:Flyout Header="统一配置"
+                        Position="Right"
+                        Width="380"
+                        Height="440"
+                        VerticalAlignment="Center"
+                        Margin="0,0,12,0"
+                        Theme="Light"
+                        IsModal="True"
+                        IsOpen="{Binding ActuatorDebug.IsPresetConfigurationOpen, Mode=TwoWay}">
+                <Grid Margin="14,12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="12" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <TextBlock Text="位置设置" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,8" />
+                            <TextBlock Text="设置仅保存至本机，不会写入设备。"
+                                       FontSize="12"
+                                       Foreground="#6B6B6B"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,8" />
+                            <ItemsControl ItemsSource="{Binding ActuatorDebug.EditablePresets}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,5">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="92" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="32" />
+                                                <ColumnDefinition Width="58" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center" />
+                                            <TextBox Grid.Column="1"
+                                                     Text="{Binding PositionSteps, UpdateSourceTrigger=PropertyChanged}"
+                                                     VerticalContentAlignment="Center"
+                                                     mah:ControlsHelper.CornerRadius="6" />
+                                            <TextBlock Grid.Column="2" Text="step" Margin="6,0,0,0" VerticalAlignment="Center" Foreground="#6B6B6B" FontSize="12" />
+                                            <TextBlock Grid.Column="3"
+                                                       Text="{Binding Percentage, StringFormat={}{0:0.0}%}"
+                                                       HorizontalAlignment="Right"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="#6B6B6B"
+                                                       FontSize="12" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Text="{Binding ActuatorDebug.PresetConfigurationMessage}"
+                                       Margin="0,8,0,0"
+                                       Foreground="#C42B1C"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Content="取消" Command="{Binding ActuatorDebug.ClosePresetConfigurationCommand}" MinWidth="76" Margin="0,0,8,0" mah:ControlsHelper.CornerRadius="6" />
+                        <Button Content="保存配置" Command="{Binding ActuatorDebug.SavePresetConfigurationCommand}" MinWidth="88" Background="#0078D4" BorderBrush="#0078D4" Foreground="White" mah:ControlsHelper.CornerRadius="6" />
+                    </StackPanel>
+                </Grid>
+            </mah:Flyout>
         </mah:FlyoutsControl>
     </mah:MetroWindow.Flyouts>
     <Grid Background="#F3F3F3">
