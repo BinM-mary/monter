@@ -313,7 +313,16 @@
                     <Border Width="1" Height="14" Background="#D7D7D7" VerticalAlignment="Center" />
                     <TextBlock Text="{Binding SerialSettings.ConnectionPortDisplayText}" Margin="12,0" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" />
                     <Border Width="1" Height="14" Background="#D7D7D7" VerticalAlignment="Center" />
-                    <TextBlock Text="报文输出窗口" Margin="12,0" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" />
+                    <Button Content="报文输出窗口"
+                            Click="ProtocolLogWindow_Click"
+                            Margin="12,0"
+                            Padding="0"
+                            FontSize="12"
+                            Foreground="#0078D4"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            VerticalAlignment="Center"
+                            ToolTip="查看发送与接收的协议报文" />
                     <Border Width="1" Height="14" Background="#D7D7D7" VerticalAlignment="Center" />
                     <TextBlock Text="HE11" Margin="12,0" FontSize="12" Foreground="#6B6B6B" VerticalAlignment="Center" />
                 </StackPanel>

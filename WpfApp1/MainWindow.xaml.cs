@@ -11,6 +11,7 @@ using System.Windows.Shapes;
 using System.Windows.Media.Animation;
 using MahApps.Metro.Controls;
 using WpfApp1.ViewModels;
+using WpfApp1.Views;
 
 namespace WpfApp1
 {
@@ -20,6 +21,8 @@ namespace WpfApp1
     public partial class MainWindow : MetroWindow
     {
         private const double ExpandedPaneLength = 190;
+        private readonly MainWindowViewModel viewModel;
+        private ProtocolLogWindow? protocolLogWindow;
 
         public static readonly DependencyProperty IsNavigationExpandedProperty =
             DependencyProperty.Register(
@@ -38,7 +41,27 @@ namespace WpfApp1
         {
             InitializeComponent();
 
-            DataContext = new MainWindowViewModel();
+            viewModel = new MainWindowViewModel();
+            DataContext = viewModel;
+        }
+
+        private void ProtocolLogWindow_Click(object sender, RoutedEventArgs e)
+        {
+            if (protocolLogWindow is null)
+            {
+                protocolLogWindow = new ProtocolLogWindow(viewModel.CommunicationLog)
+                {
+                    Owner = this
+                };
+                protocolLogWindow.Closed += (_, _) => protocolLogWindow = null;
+            }
+
+            if (!protocolLogWindow.IsVisible)
+            {
+                protocolLogWindow.Show();
+            }
+
+            protocolLogWindow.Activate();
         }
 
         private void MainHamburgerMenu_HamburgerButtonClick(object sender, RoutedEventArgs e)

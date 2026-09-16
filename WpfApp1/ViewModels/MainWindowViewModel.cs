@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using WpfApp1.Services;
 
@@ -8,6 +9,7 @@ public partial class MainWindowViewModel : ObservableObject
 {
     public MainWindowViewModel()
     {
+        CommunicationLog = new CommunicationLogService(Application.Current.Dispatcher);
         SerialSettings = new SerialSettingsViewModel(
             new SerialPortDiscoveryService(),
             new SerialPortConnectionService());
@@ -24,6 +26,8 @@ public partial class MainWindowViewModel : ObservableObject
     public ObservableCollection<MenuItemViewModel> MenuItems { get; }
 
     public SerialSettingsViewModel SerialSettings { get; }
+
+    public ICommunicationLogService CommunicationLog { get; }
 
     public ActuatorDebugViewModel ActuatorDebug { get; }
 
