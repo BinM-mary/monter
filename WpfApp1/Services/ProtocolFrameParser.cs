@@ -78,7 +78,7 @@ public sealed class ProtocolFrameParser
             return false;
         }
 
-        var dataLength = (bufferedBytes[4] << 8) | bufferedBytes[5];
+        var dataLength = bufferedBytes[4];
         var frameLength = ProtocolFrameCodec.FixedFrameLength + dataLength;
         if (bufferedBytes.Count < frameLength)
         {

@@ -83,13 +83,13 @@ public sealed class CommunicationLogEntry
             var breakText = bytes.Length >= 2 ? FormatBytes(bytes.AsSpan(0, 2)) : "—";
             var commandText = bytes.Length >= 3 ? FormatByte(bytes[2]) : "—";
             var subCommandText = bytes.Length >= 4 ? FormatByte(bytes[3]) : "—";
-            var hasLength = bytes.Length >= 6;
-            var dataLength = hasLength ? (bytes[4] << 8) | bytes[5] : -1;
+            var hasLength = bytes.Length >= 5;
+            var dataLength = hasLength ? bytes[4] : -1;
             var dataLengthText = hasLength
-                ? $"{dataLength} (0x{dataLength:X4})"
+                ? $"{dataLength} (0x{dataLength:X2})"
                 : "—";
 
-            var payloadStart = Math.Min(6, bytes.Length);
+            var payloadStart = Math.Min(5, bytes.Length);
             var payloadEnd = bytes.Length >= ProtocolFrameCodec.FixedFrameLength
                 ? bytes.Length - 1
                 : bytes.Length;
@@ -111,7 +111,7 @@ public sealed class CommunicationLogEntry
                 && bytes.Length == ProtocolFrameCodec.FixedFrameLength + dataLength;
             var hasValidChecksum = hasExpectedLength
                 && bytes.Length >= ProtocolFrameCodec.FixedFrameLength
-                && ProtocolFrameCodec.CalculateChecksum(bytes.AsSpan(0, bytes.Length - 1)) == bytes[^1];
+                && ProtocolFrameCodec.CalculateChecksum(bytes.AsSpan(2, bytes.Length - 3)) == bytes[^1];
 
             var checksumStatusText = bytes.Length < ProtocolFrameCodec.FixedFrameLength
                 ? "不完整"
@@ -181,7 +181,9 @@ public sealed class CommunicationLogEntry
             if (bytes[0] == ProtocolFrameCodec.ResponseHeaderFirstByte
                 && bytes[1] == ProtocolFrameCodec.ResponseHeaderSecondByte)
             {
-                return "响应";
+                return bytes.Length >= 4 && bytes[3] == 0xDF
+                    ? "不支持"
+                    : "响应";
             }
 
             return "未知";

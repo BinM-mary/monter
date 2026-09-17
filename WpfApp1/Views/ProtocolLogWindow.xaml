@@ -152,7 +152,6 @@
 
         <TextBlock Grid.Row="4"
                    Margin="0,8,0,0"
-                   Text="Break、Cmd、SubCmd、Data 长度、Data、Checksum 均按当前协议解析；校验为帧头参与 XOR。"
                    FontSize="12"
                    Foreground="#6B6B6B" />
     </Grid>

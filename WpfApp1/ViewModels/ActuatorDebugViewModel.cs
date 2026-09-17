@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.Numerics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WpfApp1.Models;
@@ -63,6 +64,17 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     [ObservableProperty]
     private int targetPositionSteps;
+
+    // 当前协议尚未接入实时位置读取，后续由设备响应更新。
+    [ObservableProperty]
+    private int currentPositionSteps;
+
+    public double CurrentPositionPercent => TotalTravelSteps <= 0
+        ? 0d
+        : Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps) * 100d / TotalTravelSteps;
+
+    public string CurrentPositionSummary =>
+        $"当前： {Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps)} step / {CurrentPositionPercent:0.0}%";
 
     [ObservableProperty]
     private bool isPresetConfigurationOpen;
@@ -139,7 +151,8 @@ public partial class ActuatorDebugViewModel : ObservableObject
                 return;
             }
 
-            if (response.Data.Length != expectedDataLength)
+            if ((expectedDataLength.HasValue && response.Data.Length != expectedDataLength.Value)
+                || (!expectedDataLength.HasValue && response.Data.Length == 0))
             {
                 ShowDeviceInfoReadNotification($"{operationName}响应数据长度错误");
                 return;
@@ -185,8 +198,10 @@ public partial class ActuatorDebugViewModel : ObservableObject
         switch (operationName)
         {
             case "读取初始化步数":
-                InitializationStepsText = BinaryPrimitives
-                    .ReadUInt32BigEndian(data)
+                InitializationStepsText = new BigInteger(
+                        data,
+                        isUnsigned: true,
+                        isBigEndian: true)
                     .ToString(CultureInfo.InvariantCulture);
                 break;
             case "读取固件版本":
@@ -247,13 +262,13 @@ public partial class ActuatorDebugViewModel : ObservableObject
     private static bool TryGetDeviceInfoRequest(
         string operationName,
         out byte subCommand,
-        out int expectedDataLength)
+        out int? expectedDataLength)
     {
         switch (operationName)
         {
             case "读取初始化步数":
                 subCommand = 0x00;
-                expectedDataLength = 4;
+                expectedDataLength = null;
                 return true;
             case "读取固件版本":
                 subCommand = 0x01;
@@ -320,6 +335,50 @@ public partial class ActuatorDebugViewModel : ObservableObject
         IsPresetConfigurationOpen = false;
     }
 
+    [RelayCommand]
+    private void ReadCurrentPositionIntoPreset(string? presetId)
+    {
+        if (string.IsNullOrWhiteSpace(presetId))
+        {
+            return;
+        }
+
+        var sourcePresets = IsPresetConfigurationOpen && EditablePresets.Count > 0
+            ? EditablePresets
+            : Presets;
+        var preset = sourcePresets.FirstOrDefault(item =>
+            string.Equals(item.Id, presetId, StringComparison.Ordinal));
+        if (preset is null)
+        {
+            return;
+        }
+
+        var originalPosition = preset.PositionSteps;
+        var position = Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps);
+        preset.PositionSteps = position;
+
+        var configuration = sourcePresets
+            .Select(item => item.ToConfigurationItem())
+            .ToArray();
+        if (!motorPresetStorage.TrySave(configuration, out var errorMessage))
+        {
+            preset.PositionSteps = originalPosition;
+            ShowDeviceInfoReadNotification(errorMessage ?? "无法保存预设配置。");
+            return;
+        }
+
+        if (!ReferenceEquals(sourcePresets, Presets))
+        {
+            Presets.Clear();
+            foreach (var item in CreatePresetViewModels(configuration))
+            {
+                Presets.Add(item);
+            }
+        }
+
+        ShowDeviceInfoReadNotification($"{preset.DisplayName}已读入当前位置：{position} step");
+    }
+
     partial void OnTargetPercentChanged(double value)
     {
         if (synchronizingTargetPosition)
@@ -338,6 +397,18 @@ public partial class ActuatorDebugViewModel : ObservableObject
         {
             synchronizingTargetPosition = false;
         }
+    }
+
+    partial void OnCurrentPositionStepsChanged(int value)
+    {
+        OnPropertyChanged(nameof(CurrentPositionPercent));
+        OnPropertyChanged(nameof(CurrentPositionSummary));
+    }
+
+    partial void OnTotalTravelStepsChanged(int value)
+    {
+        OnPropertyChanged(nameof(CurrentPositionPercent));
+        OnPropertyChanged(nameof(CurrentPositionSummary));
     }
 
     partial void OnTargetPositionStepsChanged(int value)
