@@ -13,9 +13,16 @@ namespace WpfApp1.ViewModels;
 public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisposable
 {
     private const string AllFilterText = "全部";
+    private static readonly IReadOnlyList<LogRetentionOption> retentionOptions =
+    [
+        new("5000 条", 5_000),
+        new("1 万条", 10_000)
+    ];
 
     private readonly ICommunicationLogService communicationLog;
     private readonly ICollectionView filteredEntries;
+    private readonly Dictionary<FilterValueKey, int> filterValueCounts = new();
+    private bool updatingFilterOptions;
 
     public ProtocolLogWindowViewModel(ICommunicationLogService communicationLog)
     {
@@ -24,9 +31,13 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         this.communicationLog = communicationLog;
         filteredEntries = new ListCollectionView((IList)communicationLog.Entries);
         filteredEntries.Filter = FilterLogEntry;
+        selectedRetentionOption = retentionOptions.FirstOrDefault(option =>
+            option.Limit == communicationLog.RetentionLimit)
+            ?? retentionOptions[0];
 
         communicationLog.Entries.CollectionChanged += CommunicationLogEntries_CollectionChanged;
-        UpdateFilterOptions();
+        RebuildFilterValueCounts();
+        RefreshFilterOptions();
         filteredEntries.Refresh();
     }
 
@@ -34,20 +45,16 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
     public ICollectionView FilteredEntries => filteredEntries;
 
+    public IReadOnlyList<LogRetentionOption> RetentionOptions => retentionOptions;
+
     public ObservableCollection<string> DirectionFilterOptions { get; } =
     [
-        AllFilterText,
-        "TX",
-        "RX"
+        AllFilterText
     ];
 
     public ObservableCollection<string> TypeFilterOptions { get; } =
     [
-        AllFilterText,
-        "请求",
-        "响应",
-        "错误",
-        "未知"
+        AllFilterText
     ];
 
     public ObservableCollection<string> CommandFilterOptions { get; } = [AllFilterText];
@@ -55,16 +62,19 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     public ObservableCollection<string> SubCommandFilterOptions { get; } = [AllFilterText];
 
     [ObservableProperty]
-    private string selectedDirectionFilter = AllFilterText;
+    private string? selectedDirectionFilter = AllFilterText;
 
     [ObservableProperty]
-    private string selectedTypeFilter = AllFilterText;
+    private string? selectedTypeFilter = AllFilterText;
 
     [ObservableProperty]
-    private string selectedCommandFilter = AllFilterText;
+    private string? selectedCommandFilter = AllFilterText;
 
     [ObservableProperty]
-    private string selectedSubCommandFilter = AllFilterText;
+    private string? selectedSubCommandFilter = AllFilterText;
+
+    [ObservableProperty]
+    private LogRetentionOption selectedRetentionOption = retentionOptions[0];
 
     public event EventHandler? FilteredEntriesChanged;
 
@@ -74,25 +84,29 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         filteredEntries.Filter = null;
     }
 
-    partial void OnSelectedDirectionFilterChanged(string value)
+    partial void OnSelectedDirectionFilterChanged(string? value)
     {
-        RefreshFilteredEntries();
+        HandleFilterSelectionChanged();
     }
 
-    partial void OnSelectedTypeFilterChanged(string value)
+    partial void OnSelectedTypeFilterChanged(string? value)
     {
-        RefreshFilteredEntries();
+        HandleFilterSelectionChanged();
     }
 
-    partial void OnSelectedCommandFilterChanged(string value)
+    partial void OnSelectedCommandFilterChanged(string? value)
     {
-        UpdateSubCommandFilterOptions();
-        RefreshFilteredEntries();
+        HandleFilterSelectionChanged();
     }
 
-    partial void OnSelectedSubCommandFilterChanged(string value)
+    partial void OnSelectedSubCommandFilterChanged(string? value)
     {
-        RefreshFilteredEntries();
+        HandleFilterSelectionChanged();
+    }
+
+    partial void OnSelectedRetentionOptionChanged(LogRetentionOption value)
+    {
+        communicationLog.SetRetentionLimit(value.Limit);
     }
 
     [RelayCommand]
@@ -115,49 +129,181 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         object? sender,
         NotifyCollectionChangedEventArgs e)
     {
-        UpdateFilterOptions();
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Add:
+                if (e.NewItems is not null)
+                {
+                    foreach (var entry in e.NewItems.OfType<CommunicationLogEntry>())
+                    {
+                        AddFilterValues(entry);
+                    }
+                }
+
+                RefreshFilterOptions();
+                NotifyFilteredEntriesChanged();
+                break;
+            case NotifyCollectionChangedAction.Remove:
+                if (e.OldItems is not null)
+                {
+                    foreach (var entry in e.OldItems.OfType<CommunicationLogEntry>())
+                    {
+                        RemoveFilterValues(entry);
+                    }
+                }
+
+                RefreshFilterOptions();
+                break;
+            default:
+                RebuildFilterValueCounts();
+                RefreshFilterOptions();
+                NotifyFilteredEntriesChanged();
+                break;
+        }
+    }
+
+    private void HandleFilterSelectionChanged()
+    {
+        if (updatingFilterOptions)
+        {
+            return;
+        }
+
         RefreshFilteredEntries();
+        RefreshFilterOptions();
     }
 
-    private void UpdateFilterOptions()
+    private void RefreshFilterOptions()
     {
-        var commandValues = communicationLog.Entries
-            .Select(entry => entry.CommandText)
-            .Where(IsFilterValue)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        ReplaceOptions(CommandFilterOptions, commandValues);
-        if (!ContainsFilterValue(CommandFilterOptions, SelectedCommandFilter))
+        if (updatingFilterOptions)
         {
-            SelectedCommandFilter = AllFilterText;
+            return;
         }
 
-        UpdateSubCommandFilterOptions();
+        updatingFilterOptions = true;
+        var selectionWasChanged = false;
+        try
+        {
+            // 其他筛选条件改变后，当前选择可能失效；最多四轮即可收敛。
+            for (var iteration = 0; iteration < 4; iteration++)
+            {
+                var directionOptions = GetCandidateFilterValues(FilterDimension.Direction);
+                var typeOptions = GetCandidateFilterValues(FilterDimension.Type);
+                var commandOptions = GetCandidateFilterValues(FilterDimension.Command);
+                var subCommandOptions = GetCandidateFilterValues(FilterDimension.SubCommand);
+
+                var selectionChanged = EnsureSelections(
+                    directionOptions,
+                    typeOptions,
+                    commandOptions,
+                    subCommandOptions);
+                selectionWasChanged |= selectionChanged;
+
+                // 先校正选择值，再增量调整选项，避免清空集合时 WPF 暂时产生 null。
+                ReplaceOptions(DirectionFilterOptions, directionOptions);
+                ReplaceOptions(TypeFilterOptions, typeOptions);
+                ReplaceOptions(CommandFilterOptions, commandOptions);
+                ReplaceOptions(SubCommandFilterOptions, subCommandOptions);
+
+                if (!selectionChanged)
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            updatingFilterOptions = false;
+        }
+
+        if (selectionWasChanged)
+        {
+            // 自动纠正无效选项时，属性变更被保护标志暂时抑制，需要补做一次视图刷新。
+            RefreshFilteredEntries();
+        }
     }
 
-    private void UpdateSubCommandFilterOptions()
+    private List<string> GetCandidateFilterValues(FilterDimension dimension)
     {
-        IEnumerable<CommunicationLogEntry> entries = communicationLog.Entries;
-        if (!IsAllFilter(SelectedCommandFilter))
+        var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in filterValueCounts)
         {
-            entries = entries.Where(entry =>
-                string.Equals(entry.CommandText, SelectedCommandFilter, StringComparison.OrdinalIgnoreCase));
+            if (pair.Value <= 0 || !MatchesOtherFilters(pair.Key, dimension))
+            {
+                continue;
+            }
+
+            var value = dimension switch
+            {
+                FilterDimension.Direction => pair.Key.Direction,
+                FilterDimension.Type => pair.Key.Type,
+                FilterDimension.Command => pair.Key.Command,
+                FilterDimension.SubCommand => pair.Key.SubCommand,
+                _ => "—"
+            };
+
+            if (IsFilterValue(value))
+            {
+                values.Add(value);
+            }
         }
 
-        var subCommandValues = entries
-            .Select(entry => entry.SubCommandText)
-            .Where(IsFilterValue)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        return values
             .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
 
-        ReplaceOptions(SubCommandFilterOptions, subCommandValues);
-        if (!ContainsFilterValue(SubCommandFilterOptions, SelectedSubCommandFilter))
+    private bool MatchesOtherFilters(FilterValueKey key, FilterDimension excludedDimension)
+    {
+        return (excludedDimension == FilterDimension.Direction
+                || MatchesFilter(SelectedDirectionFilter, key.Direction))
+            && (excludedDimension == FilterDimension.Type
+                || MatchesFilter(SelectedTypeFilter, key.Type))
+            && (excludedDimension == FilterDimension.Command
+                || MatchesFilter(SelectedCommandFilter, key.Command))
+            && (excludedDimension == FilterDimension.SubCommand
+                || MatchesFilter(SelectedSubCommandFilter, key.SubCommand));
+    }
+
+    private bool EnsureSelections(
+        IEnumerable<string> directionOptions,
+        IEnumerable<string> typeOptions,
+        IEnumerable<string> commandOptions,
+        IEnumerable<string> subCommandOptions)
+    {
+        var selectionChanged = false;
+        selectionChanged |= EnsureSelection(
+            SelectedDirectionFilter,
+            directionOptions,
+            value => SelectedDirectionFilter = value);
+        selectionChanged |= EnsureSelection(
+            SelectedTypeFilter,
+            typeOptions,
+            value => SelectedTypeFilter = value);
+        selectionChanged |= EnsureSelection(
+            SelectedCommandFilter,
+            commandOptions,
+            value => SelectedCommandFilter = value);
+        selectionChanged |= EnsureSelection(
+            SelectedSubCommandFilter,
+            subCommandOptions,
+            value => SelectedSubCommandFilter = value);
+        return selectionChanged;
+    }
+
+    private static bool EnsureSelection(
+        string? selectedValue,
+        IEnumerable<string> options,
+        Action<string> setSelection)
+    {
+        if (selectedValue is not null
+            && (IsAllFilter(selectedValue) || ContainsFilterValue(options, selectedValue)))
         {
-            SelectedSubCommandFilter = AllFilterText;
+            return false;
         }
+
+        setSelection(AllFilterText);
+        return true;
     }
 
     private static void ReplaceOptions(
@@ -170,10 +316,45 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
             return;
         }
 
-        options.Clear();
-        foreach (var option in desiredOptions)
+        var desiredSet = desiredOptions.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        for (var index = options.Count - 1; index >= 0; index--)
         {
-            options.Add(option);
+            if (!desiredSet.Contains(options[index]))
+            {
+                options.RemoveAt(index);
+            }
+        }
+
+        for (var index = 0; index < desiredOptions.Count; index++)
+        {
+            var desiredOption = desiredOptions[index];
+            if (index < options.Count
+                && string.Equals(options[index], desiredOption, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var existingIndex = -1;
+            for (var optionIndex = 0; optionIndex < options.Count; optionIndex++)
+            {
+                if (string.Equals(
+                        options[optionIndex],
+                        desiredOption,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    existingIndex = optionIndex;
+                    break;
+                }
+            }
+
+            if (existingIndex >= 0)
+            {
+                options.Move(existingIndex, index);
+            }
+            else
+            {
+                options.Insert(index, desiredOption);
+            }
         }
     }
 
@@ -193,18 +374,24 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     private void RefreshFilteredEntries()
     {
         filteredEntries.Refresh();
+        NotifyFilteredEntriesChanged();
+    }
+
+    private void NotifyFilteredEntriesChanged()
+    {
         FilteredEntriesChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private static bool MatchesFilter(string selectedValue, string actualValue)
+    private static bool MatchesFilter(string? selectedValue, string actualValue)
     {
         return IsAllFilter(selectedValue)
             || string.Equals(selectedValue, actualValue, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsAllFilter(string value)
+    private static bool IsAllFilter(string? value)
     {
-        return string.Equals(value, AllFilterText, StringComparison.OrdinalIgnoreCase);
+        return string.IsNullOrWhiteSpace(value)
+            || string.Equals(value, AllFilterText, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsFilterValue(string value)
@@ -212,11 +399,83 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         return !string.IsNullOrWhiteSpace(value) && value != "—";
     }
 
+    private void RebuildFilterValueCounts()
+    {
+        filterValueCounts.Clear();
+
+        foreach (var entry in communicationLog.Entries)
+        {
+            AddFilterValues(entry);
+        }
+    }
+
+    private void AddFilterValues(CommunicationLogEntry entry)
+    {
+        IncrementCount(filterValueCounts, new FilterValueKey(
+            entry.DirectionText,
+            entry.FrameTypeText,
+            entry.CommandText,
+            entry.SubCommandText));
+    }
+
+    private void RemoveFilterValues(CommunicationLogEntry entry)
+    {
+        DecrementCount(filterValueCounts, new FilterValueKey(
+            entry.DirectionText,
+            entry.FrameTypeText,
+            entry.CommandText,
+            entry.SubCommandText));
+    }
+
+    private static void IncrementCount(
+        IDictionary<FilterValueKey, int> counts,
+        FilterValueKey value)
+    {
+        counts[value] = counts.TryGetValue(value, out var count)
+            ? count + 1
+            : 1;
+    }
+
+    private static void DecrementCount(
+        IDictionary<FilterValueKey, int> counts,
+        FilterValueKey value)
+    {
+        if (!counts.TryGetValue(value, out var count))
+        {
+            return;
+        }
+
+        if (count <= 1)
+        {
+            counts.Remove(value);
+        }
+        else
+        {
+            counts[value] = count - 1;
+        }
+    }
+
     private static bool ContainsFilterValue(
         IEnumerable<string> options,
-        string value)
+        string? value)
     {
         return options.Any(option =>
             string.Equals(option, value, StringComparison.OrdinalIgnoreCase));
     }
+
+    private enum FilterDimension
+    {
+        Direction,
+        Type,
+        Command,
+        SubCommand
+    }
+
+    private readonly record struct FilterValueKey(
+        string Direction,
+        string Type,
+        string Command,
+        string SubCommand);
+
+    public sealed record LogRetentionOption(string DisplayText, int Limit);
 }

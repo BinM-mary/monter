@@ -1,4 +1,5 @@
 ﻿using System.Text;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -43,6 +44,12 @@ namespace WpfApp1
 
             viewModel = new MainWindowViewModel();
             DataContext = viewModel;
+            Closing += MainWindow_Closing;
+        }
+
+        private void MainWindow_Closing(object? sender, CancelEventArgs e)
+        {
+            protocolLogWindow?.CloseForApplicationExit();
         }
 
         private void ProtocolLogWindow_Click(object sender, RoutedEventArgs e)

@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -17,6 +18,7 @@ public partial class ProtocolLogWindow : MetroWindow
     private bool followLatest = true;
     private bool autoScrolling;
     private bool scrollToLatestPending;
+    private bool closeRequestedByApplication;
 
     public ProtocolLogWindow(ICommunicationLogService communicationLog)
     {
@@ -30,7 +32,15 @@ public partial class ProtocolLogWindow : MetroWindow
         communicationLog.Entries.CollectionChanged += CommunicationLogEntries_CollectionChanged;
         viewModel.FilteredEntriesChanged += ViewModel_FilteredEntriesChanged;
         Loaded += ProtocolLogWindow_Loaded;
+        IsVisibleChanged += ProtocolLogWindow_IsVisibleChanged;
+        Closing += ProtocolLogWindow_Closing;
         Closed += ProtocolLogWindow_Closed;
+    }
+
+    public void CloseForApplicationExit()
+    {
+        closeRequestedByApplication = true;
+        Close();
     }
 
     private void ProtocolLogWindow_Loaded(object sender, RoutedEventArgs e)
@@ -53,11 +63,35 @@ public partial class ProtocolLogWindow : MetroWindow
         communicationLog.Entries.CollectionChanged -= CommunicationLogEntries_CollectionChanged;
         viewModel.FilteredEntriesChanged -= ViewModel_FilteredEntriesChanged;
         viewModel.Dispose();
+        IsVisibleChanged -= ProtocolLogWindow_IsVisibleChanged;
 
         if (logScrollViewer is not null)
         {
             logScrollViewer.ScrollChanged -= LogScrollViewer_ScrollChanged;
         }
+    }
+
+    private void ProtocolLogWindow_IsVisibleChanged(
+        object sender,
+        DependencyPropertyChangedEventArgs e)
+    {
+        if (IsVisible)
+        {
+            followLatest = true;
+            ScheduleScrollToLatest();
+        }
+    }
+
+    private void ProtocolLogWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        if (closeRequestedByApplication)
+        {
+            return;
+        }
+
+        // 保留窗口和 ViewModel，下一次打开时直接复用，避免重新加载全部历史报文。
+        e.Cancel = true;
+        Hide();
     }
 
     private void ViewModel_FilteredEntriesChanged(object? sender, EventArgs e)
@@ -94,19 +128,19 @@ public partial class ProtocolLogWindow : MetroWindow
 
     private void ScheduleScrollToLatest()
     {
-        if (!followLatest || scrollToLatestPending || !IsLoaded)
+        if (!followLatest || scrollToLatestPending || !IsLoaded || !IsVisible)
         {
             return;
         }
 
         scrollToLatestPending = true;
         Dispatcher.BeginInvoke(
-            DispatcherPriority.Loaded,
+            DispatcherPriority.ContextIdle,
             new Action(() =>
             {
                 scrollToLatestPending = false;
 
-                if (!followLatest || LogListView.Items.Count == 0)
+                if (!followLatest || !IsVisible || LogListView.Items.Count == 0)
                 {
                     return;
                 }
@@ -114,8 +148,6 @@ public partial class ProtocolLogWindow : MetroWindow
                 autoScrolling = true;
                 try
                 {
-                    LogListView.UpdateLayout();
-                    LogListView.ScrollIntoView(LogListView.Items[LogListView.Items.Count - 1]);
                     logScrollViewer?.ScrollToEnd();
                 }
                 finally

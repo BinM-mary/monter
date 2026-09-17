@@ -1,4 +1,7 @@
+using System.Buffers.Binary;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WpfApp1.Models;
@@ -35,7 +38,9 @@ public partial class ActuatorDebugViewModel : ObservableObject
     {
         SerialSettings = serialSettings;
         this.deviceCommunication = deviceCommunication;
+        SerialSettings.PropertyChanged += SerialSettings_PropertyChanged;
         TotalTravelSteps = DefaultTotalTravelSteps;
+        ClearDeviceInfoValues();
         Presets = new ObservableCollection<MotorPresetViewModel>(CreatePresetViewModels(
             motorPresetStorage.LoadOrCreate(DefaultPresets)));
         EditablePresets = new ObservableCollection<MotorPresetViewModel>();
@@ -70,6 +75,24 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     [ObservableProperty]
     private string deviceInfoReadNotificationText = string.Empty;
+
+    [ObservableProperty]
+    private string initializationStepsText = string.Empty;
+
+    [ObservableProperty]
+    private string retreatAngleText = string.Empty;
+
+    [ObservableProperty]
+    private string firmwareVersionText = string.Empty;
+
+    [ObservableProperty]
+    private string hardwareVersionText = string.Empty;
+
+    [ObservableProperty]
+    private string currentVoltageText = string.Empty;
+
+    [ObservableProperty]
+    private string currentTemperatureText = string.Empty;
 
     [ObservableProperty]
     private string title = "执行器调试";
@@ -122,6 +145,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
                 return;
             }
 
+            ApplyDeviceInfoResponse(operationName, response.Data);
             ShowDeviceInfoReadNotification($"{operationName}成功");
         }
         catch (TimeoutException)
@@ -132,6 +156,61 @@ public partial class ActuatorDebugViewModel : ObservableObject
         {
             ShowDeviceInfoReadNotification($"{operationName}失败：{exception.Message}");
         }
+    }
+
+    private void SerialSettings_PropertyChanged(
+        object? sender,
+        PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SerialSettingsViewModel.IsConnected))
+        {
+            ClearDeviceInfoValues();
+        }
+    }
+
+    private void ClearDeviceInfoValues()
+    {
+        InitializationStepsText = string.Empty;
+        RetreatAngleText = string.Empty;
+        FirmwareVersionText = string.Empty;
+        HardwareVersionText = string.Empty;
+        CurrentVoltageText = string.Empty;
+        CurrentTemperatureText = string.Empty;
+    }
+
+    private void ApplyDeviceInfoResponse(
+        string operationName,
+        byte[] data)
+    {
+        switch (operationName)
+        {
+            case "读取初始化步数":
+                InitializationStepsText = BinaryPrimitives
+                    .ReadUInt32BigEndian(data)
+                    .ToString(CultureInfo.InvariantCulture);
+                break;
+            case "读取固件版本":
+                FirmwareVersionText = $"V{data[0]}.{data[1]}.{data[2]}";
+                break;
+            case "读取硬件版本":
+                HardwareVersionText = FormatHardwareVersion(data[0]);
+                break;
+            case "读取电压和温度参数":
+                var voltageMillivolts = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(0, 2));
+                var temperatureTenths = BinaryPrimitives.ReadInt16BigEndian(data.AsSpan(2, 2));
+                CurrentVoltageText =
+                    $"{(voltageMillivolts / 1000d).ToString("0.000", CultureInfo.InvariantCulture)} V";
+                CurrentTemperatureText =
+                    $"{(temperatureTenths / 10d).ToString("0.0", CultureInfo.InvariantCulture)} ℃";
+                break;
+        }
+    }
+
+    private static string FormatHardwareVersion(byte revision)
+    {
+        return revision <= 25
+            ? $"Rev.{(char)('A' + revision)}"
+            : $"Rev.0x{revision:X2}";
     }
 
     private void ShowDeviceInfoReadNotification(string text)
