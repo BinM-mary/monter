@@ -25,11 +25,16 @@ public partial class ActuatorDebugViewModel : ObservableObject
         };
 
     private readonly MotorPresetStorageService motorPresetStorage = new();
+    private readonly DeviceCommunicationService deviceCommunication;
+    private CancellationTokenSource? deviceInfoReadNotificationCancellation;
     private bool synchronizingTargetPosition;
 
-    public ActuatorDebugViewModel(SerialSettingsViewModel serialSettings)
+    public ActuatorDebugViewModel(
+        SerialSettingsViewModel serialSettings,
+        DeviceCommunicationService deviceCommunication)
     {
         SerialSettings = serialSettings;
+        this.deviceCommunication = deviceCommunication;
         TotalTravelSteps = DefaultTotalTravelSteps;
         Presets = new ObservableCollection<MotorPresetViewModel>(CreatePresetViewModels(
             motorPresetStorage.LoadOrCreate(DefaultPresets)));
@@ -61,6 +66,12 @@ public partial class ActuatorDebugViewModel : ObservableObject
     private string presetConfigurationMessage = string.Empty;
 
     [ObservableProperty]
+    private bool isDeviceInfoReadNotificationVisible;
+
+    [ObservableProperty]
+    private string deviceInfoReadNotificationText = string.Empty;
+
+    [ObservableProperty]
     private string title = "执行器调试";
 
     [ObservableProperty]
@@ -73,6 +84,115 @@ public partial class ActuatorDebugViewModel : ObservableObject
     private void Test()
     {
         StatusText = $"你好，{UserName}";
+    }
+
+    [RelayCommand]
+    private async Task ReadDeviceInfoAsync(string operationName)
+    {
+        if (!SerialSettings.IsConnected)
+        {
+            ShowDeviceInfoReadNotification("请先连接串口");
+            return;
+        }
+
+        if (!TryGetDeviceInfoRequest(operationName, out var subCommand, out var expectedDataLength))
+        {
+            return;
+        }
+
+        ShowDeviceInfoReadNotification($"正在{operationName}");
+
+        try
+        {
+            var response = await deviceCommunication.SendRequestAsync(
+                0x10,
+                subCommand,
+                ReadOnlyMemory<byte>.Empty,
+                SerialSettings.RequestTimeout);
+
+            if (response.SubCommand == 0xDF)
+            {
+                ShowDeviceInfoReadNotification($"{operationName}不受设备支持");
+                return;
+            }
+
+            if (response.Data.Length != expectedDataLength)
+            {
+                ShowDeviceInfoReadNotification($"{operationName}响应数据长度错误");
+                return;
+            }
+
+            ShowDeviceInfoReadNotification($"{operationName}成功");
+        }
+        catch (TimeoutException)
+        {
+            ShowDeviceInfoReadNotification($"{operationName}超时");
+        }
+        catch (Exception exception)
+        {
+            ShowDeviceInfoReadNotification($"{operationName}失败：{exception.Message}");
+        }
+    }
+
+    private void ShowDeviceInfoReadNotification(string text)
+    {
+        deviceInfoReadNotificationCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        deviceInfoReadNotificationCancellation = cancellation;
+        DeviceInfoReadNotificationText = text;
+        IsDeviceInfoReadNotificationVisible = true;
+        _ = HideDeviceInfoReadNotificationAsync(cancellation);
+    }
+
+    private async Task HideDeviceInfoReadNotificationAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            if (ReferenceEquals(deviceInfoReadNotificationCancellation, cancellation))
+            {
+                IsDeviceInfoReadNotificationVisible = false;
+                deviceInfoReadNotificationCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private static bool TryGetDeviceInfoRequest(
+        string operationName,
+        out byte subCommand,
+        out int expectedDataLength)
+    {
+        switch (operationName)
+        {
+            case "读取初始化步数":
+                subCommand = 0x00;
+                expectedDataLength = 4;
+                return true;
+            case "读取固件版本":
+                subCommand = 0x01;
+                expectedDataLength = 3;
+                return true;
+            case "读取硬件版本":
+                subCommand = 0x02;
+                expectedDataLength = 1;
+                return true;
+            case "读取电压和温度参数":
+                subCommand = 0x03;
+                expectedDataLength = 4;
+                return true;
+            default:
+                subCommand = 0;
+                expectedDataLength = 0;
+                return false;
+        }
     }
 
     [RelayCommand]

@@ -92,9 +92,12 @@ public partial class SerialSettingsViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(AppliedSettingsText))]
     [NotifyPropertyChangedFor(nameof(ConnectionPortDisplayText))]
+    [NotifyPropertyChangedFor(nameof(RequestTimeout))]
     private SerialPortSettings appliedSettings;
 
     public string AppliedSettingsText => AppliedSettings.DisplayText;
+
+    public TimeSpan RequestTimeout => TimeSpan.FromMilliseconds(AppliedSettings.ReadTimeout);
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ConnectionPortDisplayText))]

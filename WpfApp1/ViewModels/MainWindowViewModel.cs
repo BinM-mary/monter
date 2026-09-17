@@ -10,10 +10,12 @@ public partial class MainWindowViewModel : ObservableObject
     public MainWindowViewModel()
     {
         CommunicationLog = new CommunicationLogService(Application.Current.Dispatcher);
+        var connectionService = new SerialPortConnectionService();
         SerialSettings = new SerialSettingsViewModel(
             new SerialPortDiscoveryService(),
-            new SerialPortConnectionService());
-        ActuatorDebug = new ActuatorDebugViewModel(SerialSettings);
+            connectionService);
+        DeviceCommunication = new DeviceCommunicationService(connectionService, CommunicationLog);
+        ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, DeviceCommunication);
 
         MenuItems = new ObservableCollection<MenuItemViewModel>
         {
@@ -28,6 +30,8 @@ public partial class MainWindowViewModel : ObservableObject
     public SerialSettingsViewModel SerialSettings { get; }
 
     public ICommunicationLogService CommunicationLog { get; }
+
+    public DeviceCommunicationService DeviceCommunication { get; }
 
     public ActuatorDebugViewModel ActuatorDebug { get; }
 

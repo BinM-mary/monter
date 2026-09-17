@@ -4,6 +4,10 @@ namespace WpfApp1.Services;
 
 public interface ISerialPortConnectionService
 {
+    event Action<byte[]>? BytesReceived;
+
+    event Action<bool>? ConnectionStateChanged;
+
     /// <summary>
     /// 最近一次成功打开且尚未释放的端口名。即使系统已使底层句柄失效，也保留该值以便检测拔出事件。
     /// </summary>
@@ -20,6 +24,8 @@ public interface ISerialPortConnectionService
     void ReportReceiveActivity();
 
     Task<SerialConnectionResult> ConnectAsync(SerialPortSettings settings, CancellationToken cancellationToken = default);
+
+    Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
 
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 }

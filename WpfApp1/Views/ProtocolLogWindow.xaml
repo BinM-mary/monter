@@ -3,10 +3,10 @@
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:mah="clr-namespace:MahApps.Metro.Controls;assembly=MahApps.Metro"
                  Title="报文输出"
-                 Width="760"
-                 Height="420"
-                 MinWidth="520"
-                 MinHeight="260"
+                 Width="1120"
+                 Height="480"
+                 MinWidth="760"
+                 MinHeight="300"
                  ShowInTaskbar="False"
                  ShowMinButton="False"
                  ShowMaxRestoreButton="True"
@@ -15,40 +15,124 @@
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="10" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="8" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <DockPanel>
-            <TextBlock Text="发送与接收的完整协议帧"
-                       FontSize="14"
-                       FontWeight="SemiBold"
-                       VerticalAlignment="Center" />
             <Button DockPanel.Dock="Right"
-                    Content="清空"
-                    Command="{Binding ClearCommand}"
-                    Padding="14,3"
-                    mah:ControlsHelper.CornerRadius="5" />
+                        Content="清空"
+                        Command="{Binding ClearCommand}"
+                        Padding="8,2"
+                        MinWidth="0"
+                        MinHeight="0"
+                        FontSize="12"
+                        mah:ControlsHelper.CornerRadius="5" />
+            <TextBlock Text="收发报文详情"
+                        FontSize="14"
+                        FontWeight="SemiBold"
+                        VerticalAlignment="Center" />
         </DockPanel>
 
+        <WrapPanel Grid.Row="1"
+                   Margin="0,8,0,0"
+                   VerticalAlignment="Center">
+            <TextBlock Text="过滤："
+                       Margin="0,0,8,0"
+                       VerticalAlignment="Center" />
+            <TextBlock Text="方向"
+                       Margin="0,0,4,0"
+                       VerticalAlignment="Center" />
+            <ComboBox Width="78"
+                      Margin="0,0,12,0"
+                      ItemsSource="{Binding DirectionFilterOptions}"
+                      SelectedItem="{Binding SelectedDirectionFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <TextBlock Text="类型"
+                       Margin="0,0,4,0"
+                       VerticalAlignment="Center" />
+            <ComboBox Width="78"
+                      Margin="0,0,12,0"
+                      ItemsSource="{Binding TypeFilterOptions}"
+                      SelectedItem="{Binding SelectedTypeFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <TextBlock Text="Cmd"
+                       Margin="0,0,4,0"
+                       VerticalAlignment="Center" />
+            <ComboBox Width="88"
+                      Margin="0,0,12,0"
+                      ItemsSource="{Binding CommandFilterOptions}"
+                      SelectedItem="{Binding SelectedCommandFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <TextBlock Text="SubCmd"
+                       Margin="0,0,4,0"
+                       VerticalAlignment="Center" />
+            <ComboBox Width="88"
+                      Margin="0,0,12,0"
+                      ItemsSource="{Binding SubCommandFilterOptions}"
+                      SelectedItem="{Binding SelectedSubCommandFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Button Content="重置筛选"
+                    Command="{Binding ResetFiltersCommand}"
+                    Padding="10,2"
+                    MinWidth="0"
+                    MinHeight="0"
+                    FontSize="12"
+                    mah:ControlsHelper.CornerRadius="5" />
+        </WrapPanel>
+
         <ListView x:Name="LogListView"
-                  Grid.Row="2"
-                  ItemsSource="{Binding CommunicationLog.Entries}"
+                  Grid.Row="3"
+                  ItemsSource="{Binding FilteredEntries}"
                   BorderBrush="#D7D7D7"
                   BorderThickness="1"
                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                   ScrollViewer.VerticalScrollBarVisibility="Auto">
             <ListView.View>
                 <GridView>
-                    <GridViewColumn Header="时间" Width="105" DisplayMemberBinding="{Binding TimestampText}" />
-                    <GridViewColumn Header="方向" Width="55" DisplayMemberBinding="{Binding DirectionText}" />
-                    <GridViewColumn Header="报文（十六进制）" Width="550">
+                    <GridViewColumn Header="时间"
+                                    Width="105"
+                                    DisplayMemberBinding="{Binding TimestampText}" />
+                    <GridViewColumn Header="方向"
+                                    Width="55"
+                                    DisplayMemberBinding="{Binding DirectionText}" />
+                    <GridViewColumn Header="类型"
+                                    Width="60"
+                                    DisplayMemberBinding="{Binding FrameTypeText}" />
+                    <GridViewColumn Header="Break"
+                                    Width="75"
+                                    DisplayMemberBinding="{Binding BreakText}" />
+                    <GridViewColumn Header="Cmd"
+                                    Width="65"
+                                    DisplayMemberBinding="{Binding CommandText}" />
+                    <GridViewColumn Header="SubCmd"
+                                    Width="75"
+                                    DisplayMemberBinding="{Binding SubCommandText}" />
+                    <GridViewColumn Header="Data 长度"
+                                    Width="100"
+                                    DisplayMemberBinding="{Binding DataLengthText}" />
+                    <GridViewColumn Header="Data"
+                                    Width="300">
                         <GridViewColumn.CellTemplate>
                             <DataTemplate>
-                                <TextBlock Text="{Binding Data}"
+                                <TextBlock Text="{Binding PayloadText}"
                                            FontFamily="Cascadia Mono, Consolas"
                                            TextWrapping="NoWrap" />
+                            </DataTemplate>
+                        </GridViewColumn.CellTemplate>
+                    </GridViewColumn>
+                    <GridViewColumn Header="Checksum"
+                                    Width="90"
+                                    DisplayMemberBinding="{Binding ChecksumText}" />
+                    <GridViewColumn Header="校验"
+                                    Width="70"
+                                    DisplayMemberBinding="{Binding ChecksumStatusText}" />
+                    <GridViewColumn Header="原始帧"
+                                    Width="320">
+                        <GridViewColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding RawDataText}"
+                                           FontFamily="Cascadia Mono, Consolas"
+                                           TextWrapping="NoWrap"
+                                           ToolTip="{Binding Data}" />
                             </DataTemplate>
                         </GridViewColumn.CellTemplate>
                     </GridViewColumn>
@@ -56,9 +140,9 @@
             </ListView.View>
         </ListView>
 
-        <TextBlock Grid.Row="3"
+        <TextBlock Grid.Row="4"
                    Margin="0,8,0,0"
-                   Text="通信收发管线接入后，报文将在此实时显示。"
+                   Text="Break、Cmd、SubCmd、Data 长度、Data、Checksum 均按当前协议解析；校验为帧头参与 XOR。"
                    FontSize="12"
                    Foreground="#6B6B6B" />
     </Grid>

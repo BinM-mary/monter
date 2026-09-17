@@ -14,6 +14,10 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
     private SerialPort? serialPort;
     private long lastReceiveTimestamp;
 
+    public event Action<byte[]>? BytesReceived;
+
+    public event Action<bool>? ConnectionStateChanged;
+
     public string? ConnectedPortName
     {
         get
@@ -47,6 +51,11 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
         return Task.Run(ClosePort, cancellationToken);
     }
 
+    public Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => Write(data, cancellationToken), cancellationToken);
+    }
+
     public void Dispose()
     {
         ClosePort();
@@ -63,13 +72,21 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
             port.Open();
             cancellationToken.ThrowIfCancellationRequested();
 
+            var replacedConnection = false;
             lock (syncRoot)
             {
-                ClosePortCore();
+                replacedConnection = ClosePortCore();
                 serialPort = port;
                 port = null!;
                 ReportReceiveActivity();
             }
+
+            if (replacedConnection)
+            {
+                ConnectionStateChanged?.Invoke(false);
+            }
+
+            ConnectionStateChanged?.Invoke(true);
         }
         finally
         {
@@ -97,13 +114,19 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
 
     private void ClosePort()
     {
+        var wasConnected = false;
         lock (syncRoot)
         {
-            ClosePortCore();
+            wasConnected = ClosePortCore();
+        }
+
+        if (wasConnected)
+        {
+            ConnectionStateChanged?.Invoke(false);
         }
     }
 
-    private void ClosePortCore()
+    private bool ClosePortCore()
     {
         var port = serialPort;
         serialPort = null;
@@ -111,7 +134,7 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
 
         if (port is null)
         {
-            return;
+            return false;
         }
 
         try
@@ -123,17 +146,65 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
         {
             // 物理拔出后清理底层端口句柄可能失败，状态已被置为断开，不能让清理异常影响界面。
         }
+
+        return true;
     }
 
     private void HandleDataReceived(object sender, SerialDataReceivedEventArgs eventArgs)
     {
+        byte[]? receivedBytes = null;
         lock (syncRoot)
         {
-            if (ReferenceEquals(sender, serialPort))
+            if (!ReferenceEquals(sender, serialPort) || serialPort is null)
             {
-                // 只记录活动，不读取任何字节，接收缓冲区完全由后续接收管线独占。
+                return;
+            }
+
+            try
+            {
+                var byteCount = serialPort.BytesToRead;
+                if (byteCount == 0)
+                {
+                    return;
+                }
+
+                receivedBytes = new byte[byteCount];
+                var readCount = serialPort.Read(receivedBytes, 0, byteCount);
+                if (readCount != byteCount)
+                {
+                    Array.Resize(ref receivedBytes, readCount);
+                }
+
                 ReportReceiveActivity();
             }
+            catch (Exception exception) when (exception is IOException or InvalidOperationException or UnauthorizedAccessException or TimeoutException)
+            {
+                return;
+            }
+        }
+
+        if (receivedBytes is { Length: > 0 })
+        {
+            BytesReceived?.Invoke(receivedBytes);
+        }
+    }
+
+    private void Write(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        if (data.IsEmpty)
+        {
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (syncRoot)
+        {
+            if (serialPort is not { IsOpen: true } port)
+            {
+                throw new InvalidOperationException("串口未连接。");
+            }
+
+            port.Write(data.ToArray(), 0, data.Length);
         }
     }
 
