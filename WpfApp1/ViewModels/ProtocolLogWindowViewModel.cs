@@ -23,6 +23,8 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     private readonly ICollectionView filteredEntries;
     private readonly Dictionary<FilterValueKey, int> filterValueCounts = new();
     private bool updatingFilterOptions;
+    private bool updatesSuspended;
+    private IDisposable? refreshDeferral;
 
     public ProtocolLogWindowViewModel(ICommunicationLogService communicationLog)
     {
@@ -78,9 +80,45 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
     public event EventHandler? FilteredEntriesChanged;
 
+    public void SuspendUpdates()
+    {
+        if (updatesSuspended)
+        {
+            return;
+        }
+
+        updatesSuspended = true;
+        refreshDeferral = filteredEntries.DeferRefresh();
+    }
+
+    public void ResumeUpdates()
+    {
+        if (!updatesSuspended)
+        {
+            return;
+        }
+
+        try
+        {
+            // 隐藏期间日志仍然保存在通信日志集合中；重新显示时只重建一次筛选状态和视图。
+            RebuildFilterValueCounts();
+            RefreshFilterOptions();
+        }
+        finally
+        {
+            updatesSuspended = false;
+            refreshDeferral?.Dispose();
+            refreshDeferral = null;
+        }
+
+        NotifyFilteredEntriesChanged();
+    }
+
     public void Dispose()
     {
         communicationLog.Entries.CollectionChanged -= CommunicationLogEntries_CollectionChanged;
+        refreshDeferral?.Dispose();
+        refreshDeferral = null;
         filteredEntries.Filter = null;
     }
 
@@ -129,6 +167,11 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         object? sender,
         NotifyCollectionChangedEventArgs e)
     {
+        if (updatesSuspended)
+        {
+            return;
+        }
+
         switch (e.Action)
         {
             case NotifyCollectionChangedAction.Add:
@@ -164,7 +207,7 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
     private void HandleFilterSelectionChanged()
     {
-        if (updatingFilterOptions)
+        if (updatingFilterOptions || updatesSuspended)
         {
             return;
         }
@@ -373,6 +416,11 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
     private void RefreshFilteredEntries()
     {
+        if (updatesSuspended)
+        {
+            return;
+        }
+
         filteredEntries.Refresh();
         NotifyFilteredEntriesChanged();
     }

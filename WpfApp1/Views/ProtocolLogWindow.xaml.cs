@@ -78,6 +78,7 @@ public partial class ProtocolLogWindow : MetroWindow
         if (IsVisible)
         {
             followLatest = true;
+            viewModel.ResumeUpdates();
             ScheduleScrollToLatest();
         }
     }
@@ -91,6 +92,7 @@ public partial class ProtocolLogWindow : MetroWindow
 
         // 保留窗口和 ViewModel，下一次打开时直接复用，避免重新加载全部历史报文。
         e.Cancel = true;
+        viewModel.SuspendUpdates();
         Hide();
     }
 

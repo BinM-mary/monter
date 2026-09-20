@@ -1,18 +1,41 @@
-using System.IO.Ports;
 using System.IO;
 using System.Diagnostics;
+using System.IO.Ports;
+using System.Collections.Concurrent;
 using WpfApp1.Models;
 
 namespace WpfApp1.Services;
 
 /// <summary>
-/// 管理单个串口的打开与释放，确保连接状态不会散落在界面代码中。
+/// 管理单个串口的打开与释放，并将串口事件、接收解析和串口写入解耦。
 /// </summary>
 public sealed class SerialPortConnectionService : ISerialPortConnectionService, IDisposable
 {
+    private const int ReceiveQueueCapacity = 256;
+    private const int TransmitQueueCapacity = 256;
+
     private readonly object syncRoot = new();
+    private readonly ConcurrentQueue<ReceiveChunk> receiveQueue = new();
+    private readonly SemaphoreSlim receiveQueueSlots =
+        new(ReceiveQueueCapacity, ReceiveQueueCapacity);
+    private readonly SemaphoreSlim receiveSignal = new(0);
+    private readonly ConcurrentQueue<PendingWrite> transmitQueue = new();
+    private readonly SemaphoreSlim transmitQueueSlots =
+        new(TransmitQueueCapacity, TransmitQueueCapacity);
+    private readonly SemaphoreSlim transmitSignal = new(0);
+    private readonly CancellationTokenSource workerCancellation = new();
+    private readonly Task receiveWorker;
+    private readonly Task transmitWorker;
     private SerialPort? serialPort;
     private long lastReceiveTimestamp;
+    private long connectionGeneration;
+    private int disposed;
+
+    public SerialPortConnectionService()
+    {
+        receiveWorker = Task.Run(ProcessReceiveQueueAsync);
+        transmitWorker = Task.Run(ProcessTransmitQueueAsync);
+    }
 
     public event Action<byte[]>? BytesReceived;
 
@@ -51,18 +74,80 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
         return Task.Run(ClosePort, cancellationToken);
     }
 
-    public Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    public async Task SendAsync(
+        ReadOnlyMemory<byte> data,
+        CancellationToken cancellationToken = default)
     {
-        return Task.Run(() => Write(data, cancellationToken), cancellationToken);
+        if (data.IsEmpty)
+        {
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        PendingWrite? request = null;
+        await transmitQueueSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (syncRoot)
+            {
+                ThrowIfDisposed();
+                if (serialPort is not { IsOpen: true })
+                {
+                    throw new InvalidOperationException("串口未连接。");
+                }
+
+                request = new PendingWrite(
+                    data.ToArray(),
+                    connectionGeneration,
+                    cancellationToken);
+                transmitQueue.Enqueue(request);
+            }
+
+            transmitSignal.Release();
+        }
+        catch
+        {
+            transmitQueueSlots.Release();
+            throw;
+        }
+
+        await request!.Completion.Task
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+
         ClosePort();
+        workerCancellation.Cancel();
+        receiveSignal.Release();
+        transmitSignal.Release();
+
+        try
+        {
+            Task.WaitAll(receiveWorker, transmitWorker);
+        }
+        catch (AggregateException)
+        {
+            // 工作线程在释放阶段的取消由各自循环处理，不能影响应用退出。
+        }
+
+        receiveQueueSlots.Dispose();
+        receiveSignal.Dispose();
+        transmitQueueSlots.Dispose();
+        transmitSignal.Dispose();
+        workerCancellation.Dispose();
     }
 
     private void OpenPort(SerialPortSettings settings, CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         cancellationToken.ThrowIfCancellationRequested();
         var port = CreatePort(settings);
         port.DataReceived += HandleDataReceived;
@@ -76,7 +161,9 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
             lock (syncRoot)
             {
                 replacedConnection = ClosePortCore();
+                ThrowIfDisposed();
                 serialPort = port;
+                connectionGeneration++;
                 port = null!;
                 ReportReceiveActivity();
             }
@@ -130,7 +217,11 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
     {
         var port = serialPort;
         serialPort = null;
+        connectionGeneration++;
         Interlocked.Exchange(ref lastReceiveTimestamp, 0);
+
+        FailQueuedTransmits(new InvalidOperationException("串口已断开。"));
+        ClearQueuedReceives();
 
         if (port is null)
         {
@@ -153,6 +244,7 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
     private void HandleDataReceived(object sender, SerialDataReceivedEventArgs eventArgs)
     {
         byte[]? receivedBytes = null;
+        long generation;
         lock (syncRoot)
         {
             if (!ReferenceEquals(sender, serialPort) || serialPort is null)
@@ -175,6 +267,7 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
                     Array.Resize(ref receivedBytes, readCount);
                 }
 
+                generation = connectionGeneration;
                 ReportReceiveActivity();
             }
             catch (Exception exception) when (exception is IOException or InvalidOperationException or UnauthorizedAccessException or TimeoutException)
@@ -185,26 +278,164 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
 
         if (receivedBytes is { Length: > 0 })
         {
-            BytesReceived?.Invoke(receivedBytes);
+            EnqueueReceivedBytes(receivedBytes, generation);
         }
     }
 
-    private void Write(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    private void EnqueueReceivedBytes(byte[] data, long generation)
     {
-        if (data.IsEmpty)
+        try
+        {
+            // RX 队列有界但不丢弃数据；队列满时短暂阻塞串口事件线程，等待解析线程释放空间。
+            receiveQueueSlots.Wait(workerCancellation.Token);
+        }
+        catch (OperationCanceledException)
         {
             return;
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref disposed) != 0)
+        {
+            receiveQueueSlots.Release();
+            return;
+        }
+
+        receiveQueue.Enqueue(new ReceiveChunk(data, generation));
+        receiveSignal.Release();
+    }
+
+    private async Task ProcessReceiveQueueAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                await receiveSignal.WaitAsync(workerCancellation.Token).ConfigureAwait(false);
+                while (receiveQueue.TryDequeue(out var chunk))
+                {
+                    receiveQueueSlots.Release();
+
+                    if (!IsCurrentConnection(chunk.Generation))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        BytesReceived?.Invoke(chunk.Data);
+                    }
+                    catch (Exception exception)
+                    {
+                        // 解析或业务订阅异常不能终止后续 RX 队列消费。
+                        Debug.WriteLine(exception);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (workerCancellation.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task ProcessTransmitQueueAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                await transmitSignal.WaitAsync(workerCancellation.Token).ConfigureAwait(false);
+                while (transmitQueue.TryDequeue(out var request))
+                {
+                    transmitQueueSlots.Release();
+                    ProcessPendingWrite(request);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (workerCancellation.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            FailQueuedTransmits(new ObjectDisposedException(nameof(SerialPortConnectionService)));
+        }
+    }
+
+    private void ProcessPendingWrite(PendingWrite request)
+    {
+        try
+        {
+            request.CancellationToken.ThrowIfCancellationRequested();
+            Write(request);
+            request.Completion.TrySetResult(null);
+        }
+        catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
+        {
+            TrySetCanceled(request);
+        }
+        catch (Exception exception)
+        {
+            request.Completion.TrySetException(exception);
+        }
+    }
+
+    private void Write(PendingWrite request)
+    {
+        request.CancellationToken.ThrowIfCancellationRequested();
         lock (syncRoot)
         {
-            if (serialPort is not { IsOpen: true } port)
+            if (request.Generation != connectionGeneration
+                || serialPort is not { IsOpen: true } port)
             {
                 throw new InvalidOperationException("串口未连接。");
             }
 
-            port.Write(data.ToArray(), 0, data.Length);
+            port.Write(request.Data, 0, request.Data.Length);
+        }
+    }
+
+    private bool IsCurrentConnection(long generation)
+    {
+        lock (syncRoot)
+        {
+            return generation == connectionGeneration
+                && serialPort is { IsOpen: true };
+        }
+    }
+
+    private void ClearQueuedReceives()
+    {
+        while (receiveQueue.TryDequeue(out _))
+        {
+            receiveQueueSlots.Release();
+        }
+    }
+
+    private void FailQueuedTransmits(Exception exception)
+    {
+        while (transmitQueue.TryDequeue(out var request))
+        {
+            transmitQueueSlots.Release();
+            request.Completion.TrySetException(exception);
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(SerialPortConnectionService));
+        }
+    }
+
+    private static void TrySetCanceled(PendingWrite request)
+    {
+        if (request.CancellationToken.CanBeCanceled)
+        {
+            request.Completion.TrySetCanceled(request.CancellationToken);
+        }
+        else
+        {
+            request.Completion.TrySetCanceled();
         }
     }
 
@@ -220,5 +451,26 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
             ReadTimeout = settings.ReadTimeout,
             WriteTimeout = settings.WriteTimeout
         };
+    }
+
+    private readonly record struct ReceiveChunk(byte[] Data, long Generation);
+
+    private sealed class PendingWrite
+    {
+        public PendingWrite(byte[] data, long generation, CancellationToken cancellationToken)
+        {
+            Data = data;
+            Generation = generation;
+            CancellationToken = cancellationToken;
+        }
+
+        public byte[] Data { get; }
+
+        public long Generation { get; }
+
+        public CancellationToken CancellationToken { get; }
+
+        public TaskCompletionSource<object?> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
