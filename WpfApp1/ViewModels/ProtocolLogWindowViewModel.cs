@@ -24,7 +24,6 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     private readonly Dictionary<FilterValueKey, int> filterValueCounts = new();
     private bool updatingFilterOptions;
     private bool updatesSuspended;
-    private IDisposable? refreshDeferral;
 
     public ProtocolLogWindowViewModel(ICommunicationLogService communicationLog)
     {
@@ -88,7 +87,6 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         }
 
         updatesSuspended = true;
-        refreshDeferral = filteredEntries.DeferRefresh();
     }
 
     public void ResumeUpdates()
@@ -100,16 +98,16 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
         try
         {
-            // 隐藏期间日志仍然保存在通信日志集合中；重新显示时只重建一次筛选状态和视图。
+            // 隐藏期间日志仍然保存在通信日志集合中；重新显示时重建筛选状态并主动刷新一次视图。
             RebuildFilterValueCounts();
             RefreshFilterOptions();
         }
         finally
         {
             updatesSuspended = false;
-            refreshDeferral?.Dispose();
-            refreshDeferral = null;
         }
+
+        RefreshFilteredEntries();
 
         NotifyFilteredEntriesChanged();
     }
@@ -117,8 +115,6 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     public void Dispose()
     {
         communicationLog.Entries.CollectionChanged -= CommunicationLogEntries_CollectionChanged;
-        refreshDeferral?.Dispose();
-        refreshDeferral = null;
         filteredEntries.Filter = null;
     }
 

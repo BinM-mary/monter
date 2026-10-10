@@ -1,5 +1,14 @@
 # 修改记录
 
+## 2026-09-22
+
+### 修复日志窗口延迟刷新导致的 CollectionView 异常
+
+- 修复打开报文窗口并隐藏后，关闭串口设置界面时可能触发 `System.InvalidOperationException` 的问题，异常信息为“延迟 Refresh 时无法更改或检查 CollectionView 的内容或 Current 位置”。
+- 原因是 `ProtocolLogWindowViewModel` 在 `SuspendUpdates` 时长期持有 `ICollectionView.DeferRefresh()`；窗口隐藏期间 WPF 仍可能读取 `CollectionView.Count`，而延迟刷新状态禁止读取集合内容。
+- 修改为隐藏期间只暂停日志窗口自身的筛选处理，不再跨窗口隐藏生命周期持有 `DeferRefresh`；重新显示时重建筛选状态并主动刷新一次视图。
+- 自动构建验证：独立输出构建通过，0 个警告、0 个错误。
+
 ## 2026-09-20
 
 ### 串口日志 UI 批处理（第一阶段）
