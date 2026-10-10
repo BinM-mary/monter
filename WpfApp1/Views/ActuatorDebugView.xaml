@@ -31,6 +31,7 @@
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock Text="执行器调试" FontFamily="Microsoft YaHei UI" FontSize="21" FontWeight="SemiBold" Foreground="#202020" />
                             <TextBlock Text="Actuator Control &amp; Debug" FontFamily="Segoe UI" FontSize="12" Foreground="#6B6B6B" Margin="0,2,0,0" />
+                            <TextBlock Text="{Binding ProtocolStatusText}" FontSize="11" Foreground="#9E251A" Margin="0,2,0,0" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                             <Border Style="{StaticResource ConnectionChipStyle}">

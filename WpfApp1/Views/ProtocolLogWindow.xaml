@@ -56,20 +56,20 @@
                       Margin="0,0,12,0"
                       ItemsSource="{Binding TypeFilterOptions}"
                       SelectedItem="{Binding SelectedTypeFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <TextBlock Text="Cmd"
+            <TextBlock Text="ID"
                        Margin="0,0,4,0"
                        VerticalAlignment="Center" />
             <ComboBox Width="88"
                       Margin="0,0,12,0"
-                      ItemsSource="{Binding CommandFilterOptions}"
-                      SelectedItem="{Binding SelectedCommandFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <TextBlock Text="SubCmd"
+                      ItemsSource="{Binding FrameIdFilterOptions}"
+                      SelectedItem="{Binding SelectedFrameIdFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <TextBlock Text="PID"
                        Margin="0,0,4,0"
                        VerticalAlignment="Center" />
             <ComboBox Width="88"
                       Margin="0,0,12,0"
-                      ItemsSource="{Binding SubCommandFilterOptions}"
-                      SelectedItem="{Binding SelectedSubCommandFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                      ItemsSource="{Binding ProtectedIdFilterOptions}"
+                      SelectedItem="{Binding SelectedProtectedIdFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
             <Button Content="重置筛选"
                     Command="{Binding ResetFiltersCommand}"
                     Padding="10,2"
@@ -110,12 +110,13 @@
                     <GridViewColumn Header="Break"
                                     Width="75"
                                     DisplayMemberBinding="{Binding BreakText}" />
-                    <GridViewColumn Header="Cmd"
+                    <GridViewColumn Header="Sync" Width="60" DisplayMemberBinding="{Binding SyncText}" />
+                    <GridViewColumn Header="ID"
                                     Width="65"
-                                    DisplayMemberBinding="{Binding CommandText}" />
-                    <GridViewColumn Header="SubCmd"
+                                    DisplayMemberBinding="{Binding FrameIdText}" />
+                    <GridViewColumn Header="PID"
                                     Width="75"
-                                    DisplayMemberBinding="{Binding SubCommandText}" />
+                                    DisplayMemberBinding="{Binding ProtectedIdText}" />
                     <GridViewColumn Header="Data 长度"
                                     Width="100"
                                     DisplayMemberBinding="{Binding DataLengthText}" />
@@ -129,11 +130,12 @@
                             </DataTemplate>
                         </GridViewColumn.CellTemplate>
                     </GridViewColumn>
+                    <GridViewColumn Header="Checksum model" Width="105" DisplayMemberBinding="{Binding ChecksumTypeText}" />
                     <GridViewColumn Header="Checksum"
                                     Width="90"
                                     DisplayMemberBinding="{Binding ChecksumText}" />
                     <GridViewColumn Header="校验"
-                                    Width="70"
+                                    Width="190"
                                     DisplayMemberBinding="{Binding ChecksumStatusText}" />
                     <GridViewColumn Header="原始帧"
                                     Width="320">

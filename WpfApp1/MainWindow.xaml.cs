@@ -45,6 +45,7 @@ namespace WpfApp1
             viewModel = new MainWindowViewModel();
             DataContext = viewModel;
             Closing += MainWindow_Closing;
+            Closed += (_, _) => viewModel.Dispose();
         }
 
         private void MainWindow_Closing(object? sender, CancelEventArgs e)

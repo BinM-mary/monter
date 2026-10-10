@@ -9,9 +9,9 @@ public interface ICommunicationLogService
 
     int RetentionLimit { get; }
 
-    void RecordSent(ReadOnlySpan<byte> data);
+    void RecordSent(ReadOnlySpan<byte> data, LinFrameDefinition? definition = null);
 
-    void RecordReceived(ReadOnlySpan<byte> data);
+    void RecordReceived(ReadOnlySpan<byte> data, LinFrameDefinition? definition = null, string? error = null);
 
     void SetRetentionLimit(int retentionLimit);
 

@@ -5,17 +5,22 @@ using WpfApp1.Services;
 
 namespace WpfApp1.ViewModels;
 
-public partial class MainWindowViewModel : ObservableObject
+public partial class MainWindowViewModel : ObservableObject, IDisposable
 {
+    private readonly SerialPortConnectionService connectionService;
+
     public MainWindowViewModel()
     {
         CommunicationLog = new CommunicationLogService(Application.Current.Dispatcher);
-        var connectionService = new SerialPortConnectionService();
+        connectionService = new SerialPortConnectionService();
         SerialSettings = new SerialSettingsViewModel(
             new SerialPortDiscoveryService(),
             connectionService);
-        DeviceCommunication = new DeviceCommunicationService(connectionService, CommunicationLog);
-        ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, DeviceCommunication);
+        // 电机应用帧表尚未提供；不借用旧 CMD 或 BMW 大灯的 ID/长度。
+        FrameCatalog = new LinFrameCatalog([]);
+        FrameChannel = new LinFrameChannel(connectionService, CommunicationLog, FrameCatalog);
+        ApplicationFrames = new ApplicationFrameService(FrameChannel);
+        ActuatorDebug = new ActuatorDebugViewModel(SerialSettings);
 
         MenuItems = new ObservableCollection<MenuItemViewModel>
         {
@@ -31,9 +36,21 @@ public partial class MainWindowViewModel : ObservableObject
 
     public ICommunicationLogService CommunicationLog { get; }
 
-    public DeviceCommunicationService DeviceCommunication { get; }
+    public LinFrameCatalog FrameCatalog { get; }
+
+    public LinFrameChannel FrameChannel { get; }
+
+    public ApplicationFrameService ApplicationFrames { get; }
 
     public ActuatorDebugViewModel ActuatorDebug { get; }
+
+    public void Dispose()
+    {
+        ApplicationFrames.Dispose();
+        FrameChannel.Dispose();
+        SerialSettings.Dispose();
+        connectionService.Dispose();
+    }
 
     [ObservableProperty]
     private MenuItemViewModel? selectedMenuItem;

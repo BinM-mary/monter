@@ -1,8 +1,5 @@
-using System.Buffers.Binary;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Globalization;
-using System.Numerics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WpfApp1.Models;
@@ -29,19 +26,14 @@ public partial class ActuatorDebugViewModel : ObservableObject
         };
 
     private readonly MotorPresetStorageService motorPresetStorage = new();
-    private readonly DeviceCommunicationService deviceCommunication;
     private CancellationTokenSource? deviceInfoReadNotificationCancellation;
     private bool synchronizingTargetPosition;
-    private bool hasSentCurrentPositionQueryForConnection;
 
     public ActuatorDebugViewModel(
-        SerialSettingsViewModel serialSettings,
-        DeviceCommunicationService deviceCommunication)
+        SerialSettingsViewModel serialSettings)
     {
         SerialSettings = serialSettings;
-        this.deviceCommunication = deviceCommunication;
         SerialSettings.PropertyChanged += SerialSettings_PropertyChanged;
-        deviceCommunication.FrameReceived += HandleFrameReceived;
         TotalTravelSteps = DefaultTotalTravelSteps;
         ClearDeviceInfoValues();
         Presets = new ObservableCollection<MotorPresetViewModel>(CreatePresetViewModels(
@@ -55,10 +47,15 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     public ObservableCollection<MotorPresetViewModel> EditablePresets { get; }
 
-    public bool IsMotorCommandAvailable =>
-        SerialSettings.IsConnected && HasInitializationSteps;
+    // 新电机帧 ID 和信号布局接入后再启用设备操作。
+    public bool IsDeviceProtocolAvailable => false;
 
-    public bool IsSerialCommandAvailable => SerialSettings.IsConnected;
+    public string ProtocolStatusText => "LIN 应用帧定义待配置，设备操作暂不可用";
+
+    public bool IsMotorCommandAvailable =>
+        IsDeviceProtocolAvailable && SerialSettings.IsConnected && HasInitializationSteps;
+
+    public bool IsSerialCommandAvailable => IsDeviceProtocolAvailable && SerialSettings.IsConnected;
 
     public bool IsCurrentPositionMemoryAvailable =>
         IsMotorCommandAvailable && HasCurrentPosition;
@@ -72,7 +69,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
     [ObservableProperty]
     private int targetPositionSteps;
 
-    // 当前位置由任意时刻收到的 0x30 / 0x40 有效响应更新。
+    // 当前位置待绑定新电机的 LIN 状态信号。
     [ObservableProperty]
     private int currentPositionSteps;
 
@@ -137,66 +134,10 @@ public partial class ActuatorDebugViewModel : ObservableObject
         StatusText = $"你好，{UserName}";
     }
 
-    [RelayCommand]
-    private async Task ReadDeviceInfoAsync(string operationName)
+    [RelayCommand(CanExecute = nameof(IsDeviceProtocolAvailable))]
+    private void ReadDeviceInfo(string operationName)
     {
-        if (!SerialSettings.IsConnected)
-        {
-            ShowDeviceInfoReadNotification("请先连接串口");
-            return;
-        }
-
-        if (!TryGetDeviceInfoRequest(operationName, out var subCommand, out var expectedDataLength))
-        {
-            return;
-        }
-
-        ShowDeviceInfoReadNotification($"正在{operationName}");
-
-        try
-        {
-            var response = await deviceCommunication.SendRequestAsync(
-                0x10,
-                subCommand,
-                ReadOnlyMemory<byte>.Empty,
-                SerialSettings.RequestTimeout);
-
-            if (response.SubCommand == 0xDF)
-            {
-                ShowDeviceInfoReadNotification($"{operationName}不受设备支持");
-                return;
-            }
-
-            if ((expectedDataLength.HasValue && response.Data.Length != expectedDataLength.Value)
-                || (!expectedDataLength.HasValue && response.Data.Length == 0))
-            {
-                ShowDeviceInfoReadNotification($"{operationName}响应数据长度错误");
-                return;
-            }
-
-            if (!TryApplyDeviceInfoResponse(
-                    operationName,
-                    response.Data,
-                    out var shouldRequestCurrentPosition))
-            {
-                ShowDeviceInfoReadNotification($"{operationName}响应数据范围错误");
-                return;
-            }
-
-            ShowDeviceInfoReadNotification($"{operationName}成功");
-            if (shouldRequestCurrentPosition)
-            {
-                await SendCurrentPositionQueryOnceAsync();
-            }
-        }
-        catch (TimeoutException)
-        {
-            ShowDeviceInfoReadNotification($"{operationName}超时");
-        }
-        catch (Exception exception)
-        {
-            ShowDeviceInfoReadNotification($"{operationName}失败：{exception.Message}");
-        }
+        ShowDeviceInfoReadNotification(ProtocolStatusText);
     }
 
     private void SerialSettings_PropertyChanged(
@@ -217,165 +158,12 @@ public partial class ActuatorDebugViewModel : ObservableObject
         HasInitializationSteps = false;
         HasCurrentPosition = false;
         CurrentPositionSteps = 0;
-        hasSentCurrentPositionQueryForConnection = false;
         InitializationStepsText = string.Empty;
         RetreatAngleText = string.Empty;
         FirmwareVersionText = string.Empty;
         HardwareVersionText = string.Empty;
         CurrentVoltageText = string.Empty;
         CurrentTemperatureText = string.Empty;
-    }
-
-    private bool TryApplyDeviceInfoResponse(
-        string operationName,
-        byte[] data,
-        out bool shouldRequestCurrentPosition)
-    {
-        shouldRequestCurrentPosition = false;
-        switch (operationName)
-        {
-            case "读取初始化步数":
-                if (!TryReadStepValue(data, out var initializationSteps)
-                    || initializationSteps == 0)
-                {
-                    return false;
-                }
-
-                InitializationStepsText = initializationSteps.ToString(CultureInfo.InvariantCulture);
-                UpdateTotalTravelSteps(initializationSteps);
-                HasInitializationSteps = true;
-                shouldRequestCurrentPosition = true;
-                return true;
-            case "读取固件版本":
-                FirmwareVersionText = $"V{data[0]}.{data[1]}.{data[2]}";
-                return true;
-            case "读取硬件版本":
-                HardwareVersionText = FormatHardwareVersion(data[0]);
-                return true;
-            case "读取电压和温度参数":
-                var voltageMillivolts = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(0, 2));
-                var temperatureTenths = BinaryPrimitives.ReadInt16BigEndian(data.AsSpan(2, 2));
-                CurrentVoltageText =
-                    $"{(voltageMillivolts / 1000d).ToString("0.000", CultureInfo.InvariantCulture)} V";
-                CurrentTemperatureText =
-                    $"{(temperatureTenths / 10d).ToString("0.0", CultureInfo.InvariantCulture)} ℃";
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    private void UpdateTotalTravelSteps(int value)
-    {
-        TotalTravelSteps = value;
-        synchronizingTargetPosition = true;
-        try
-        {
-            TargetPositionSteps = Math.Clamp(TargetPositionSteps, 0, value);
-            TargetPercent = Math.Round(TargetPositionSteps * 100d / value, 1);
-        }
-        finally
-        {
-            synchronizingTargetPosition = false;
-        }
-
-        CurrentPositionSteps = Math.Clamp(CurrentPositionSteps, 0, value);
-
-        foreach (var preset in Presets)
-        {
-            preset.SetTotalTravelSteps(value);
-        }
-
-        foreach (var preset in EditablePresets)
-        {
-            preset.SetTotalTravelSteps(value);
-        }
-    }
-
-    private static string FormatHardwareVersion(byte revision)
-    {
-        return revision <= 25
-            ? $"Rev.{(char)('A' + revision)}"
-            : $"Rev.0x{revision:X2}";
-    }
-
-    private async Task SendCurrentPositionQueryOnceAsync()
-    {
-        if (!IsMotorCommandAvailable || hasSentCurrentPositionQueryForConnection)
-        {
-            return;
-        }
-
-        hasSentCurrentPositionQueryForConnection = true;
-        try
-        {
-            await deviceCommunication.SendAsync(
-                0x30,
-                0x00,
-                ReadOnlyMemory<byte>.Empty);
-        }
-        catch (Exception exception)
-        {
-            ShowDeviceInfoReadNotification($"读取当前位置发送失败：{exception.Message}");
-        }
-    }
-
-    private void HandleFrameReceived(ProtocolFrame frame)
-    {
-        if (frame.Command != 0x30 || frame.SubCommand != 0x40)
-        {
-            return;
-        }
-
-        if (!TryReadStepValue(frame.Data, out var position))
-        {
-            RunOnUiThread(() => ShowDeviceInfoReadNotification("当前位置响应数据范围错误"));
-            return;
-        }
-
-        RunOnUiThread(() =>
-        {
-            if (!SerialSettings.IsConnected)
-            {
-                return;
-            }
-
-            CurrentPositionSteps = position;
-            HasCurrentPosition = true;
-        });
-    }
-
-    private static bool TryReadStepValue(byte[] data, out int value)
-    {
-        value = 0;
-        if (data.Length == 0)
-        {
-            return false;
-        }
-
-        var stepValue = new BigInteger(
-            data,
-            isUnsigned: true,
-            isBigEndian: true);
-        if (stepValue > int.MaxValue)
-        {
-            return false;
-        }
-
-        value = (int)stepValue;
-        return true;
-    }
-
-    private static void RunOnUiThread(Action action)
-    {
-        var dispatcher = System.Windows.Application.Current?.Dispatcher;
-        if (dispatcher is null || dispatcher.CheckAccess())
-        {
-            action();
-            return;
-        }
-
-        _ = dispatcher.BeginInvoke(action);
     }
 
     private void ShowDeviceInfoReadNotification(string text)
@@ -406,36 +194,6 @@ public partial class ActuatorDebugViewModel : ObservableObject
             }
 
             cancellation.Dispose();
-        }
-    }
-
-    private static bool TryGetDeviceInfoRequest(
-        string operationName,
-        out byte subCommand,
-        out int? expectedDataLength)
-    {
-        switch (operationName)
-        {
-            case "读取初始化步数":
-                subCommand = 0x00;
-                expectedDataLength = null;
-                return true;
-            case "读取固件版本":
-                subCommand = 0x01;
-                expectedDataLength = 3;
-                return true;
-            case "读取硬件版本":
-                subCommand = 0x02;
-                expectedDataLength = 1;
-                return true;
-            case "读取电压和温度参数":
-                subCommand = 0x03;
-                expectedDataLength = 4;
-                return true;
-            default:
-                subCommand = 0;
-                expectedDataLength = 0;
-                return false;
         }
     }
 
@@ -529,104 +287,28 @@ public partial class ActuatorDebugViewModel : ObservableObject
         ShowDeviceInfoReadNotification($"{preset.DisplayName}已读入当前位置：{position} step");
     }
 
-    [RelayCommand]
-    private Task ConfirmTargetPositionAsync()
+    [RelayCommand(CanExecute = nameof(IsMotorCommandAvailable))]
+    private void ConfirmTargetPosition()
     {
-        return SendTargetPositionAsync(TargetPositionSteps);
+        ShowDeviceInfoReadNotification(ProtocolStatusText);
     }
 
-    [RelayCommand]
-    private async Task MoveToPresetAsync(string? presetId)
+    [RelayCommand(CanExecute = nameof(IsMotorCommandAvailable))]
+    private void MoveToPreset(string? presetId)
     {
-        if (string.Equals(presetId, "close", StringComparison.Ordinal))
-        {
-            TargetPositionSteps = 0;
-            await SendTargetPositionAsync(0);
-            return;
-        }
-
-        var preset = Presets.FirstOrDefault(item =>
-            string.Equals(item.Id, presetId, StringComparison.Ordinal));
-        if (preset is null)
-        {
-            return;
-        }
-
-        TargetPositionSteps = preset.PositionSteps;
-        await SendTargetPositionAsync(preset.PositionSteps);
+        ShowDeviceInfoReadNotification(ProtocolStatusText);
     }
 
-    [RelayCommand]
-    private Task InitializeCalibrationAsync()
+    [RelayCommand(CanExecute = nameof(IsSerialCommandAvailable))]
+    private void InitializeCalibration()
     {
-        return SendMotorControlFrameAsync(
-            0x00,
-            ReadOnlyMemory<byte>.Empty,
-            "已发送初始化校准命令",
-            requiresInitializationSteps: false);
+        ShowDeviceInfoReadNotification(ProtocolStatusText);
     }
 
-    [RelayCommand]
-    private Task EmergencyStopAsync()
+    [RelayCommand(CanExecute = nameof(IsSerialCommandAvailable))]
+    private void EmergencyStop()
     {
-        return SendMotorControlFrameAsync(
-            0x02,
-            ReadOnlyMemory<byte>.Empty,
-            "已发送紧急停止命令",
-            requiresInitializationSteps: false);
-    }
-
-    private Task SendTargetPositionAsync(int position)
-    {
-        var normalizedPosition = Math.Clamp(position, 0, TotalTravelSteps);
-        return SendMotorControlFrameAsync(
-            0x01,
-            CreatePositionData(normalizedPosition),
-            $"已发送目标位置：{normalizedPosition} step",
-            requiresInitializationSteps: true);
-    }
-
-    private async Task SendMotorControlFrameAsync(
-        byte subCommand,
-        ReadOnlyMemory<byte> data,
-        string successMessage,
-        bool requiresInitializationSteps)
-    {
-        if (!SerialSettings.IsConnected)
-        {
-            ShowDeviceInfoReadNotification("请先连接串口");
-            return;
-        }
-
-        if (requiresInitializationSteps && !HasInitializationSteps)
-        {
-            ShowDeviceInfoReadNotification("请先读取初始化步数");
-            return;
-        }
-
-        try
-        {
-            await deviceCommunication.SendAsync(0x20, subCommand, data);
-            ShowDeviceInfoReadNotification(successMessage);
-        }
-        catch (Exception exception)
-        {
-            ShowDeviceInfoReadNotification($"发送失败：{exception.Message}");
-        }
-    }
-
-    private static byte[] CreatePositionData(int position)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32BigEndian(buffer, position);
-
-        var firstDataIndex = 0;
-        while (firstDataIndex < buffer.Length - 1 && buffer[firstDataIndex] == 0)
-        {
-            firstDataIndex++;
-        }
-
-        return buffer[firstDataIndex..].ToArray();
+        ShowDeviceInfoReadNotification(ProtocolStatusText);
     }
 
     partial void OnTargetPercentChanged(double value)

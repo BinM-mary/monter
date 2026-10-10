@@ -49,14 +49,14 @@ public sealed class CommunicationLogService : ICommunicationLogService
         }
     }
 
-    public void RecordSent(ReadOnlySpan<byte> data)
+    public void RecordSent(ReadOnlySpan<byte> data, LinFrameDefinition? definition = null)
     {
-        Add(CommunicationLogDirection.Sent, data);
+        Add(CommunicationLogDirection.Sent, data, definition, null);
     }
 
-    public void RecordReceived(ReadOnlySpan<byte> data)
+    public void RecordReceived(ReadOnlySpan<byte> data, LinFrameDefinition? definition = null, string? error = null)
     {
-        Add(CommunicationLogDirection.Received, data);
+        Add(CommunicationLogDirection.Received, data, definition, error);
     }
 
     public void SetRetentionLimit(int retentionLimit)
@@ -91,7 +91,7 @@ public sealed class CommunicationLogService : ICommunicationLogService
         });
     }
 
-    private void Add(CommunicationLogDirection direction, ReadOnlySpan<byte> data)
+    private void Add(CommunicationLogDirection direction, ReadOnlySpan<byte> data, LinFrameDefinition? definition, string? error)
     {
         if (data.IsEmpty)
         {
@@ -101,7 +101,9 @@ public sealed class CommunicationLogService : ICommunicationLogService
         var entry = new CommunicationLogEntry(
             DateTimeOffset.Now,
             direction,
-            Convert.ToHexString(data));
+            Convert.ToHexString(data),
+            definition,
+            error);
 
         lock (pendingEntriesLock)
         {

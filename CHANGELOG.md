@@ -1,5 +1,35 @@
 # 修改记录
 
+## 2026-10-10
+
+### 切换到 LIN 应用帧收发底层
+
+- 根据双方约定，串口用 `55 AA` 表示 LIN Break，其余保留 Sync、PID、Data、LIN checksum；发送从节点读取 Header 时只发送 `55 AA + 55 + PID`。
+- 移除旧 `ProtocolFrame`、`ProtocolFrameCodec`、`ProtocolFrameParser`、`DeviceCommunicationService` 及电机页面的旧 CMD/SubCmd 请求、动作发送和响应解析；不再使用旧 LEN/XOR 协议或 `SubCmd + 0x40` 匹配。
+- 新增 `LinFrameDefinition`、`LinFrame`、`LinFrameCatalog`、`LinFrameCodec`、`LinFrameParser`、`LinFrameChannel` 和 `ApplicationFrameService`。帧表明确 ID、数据长度、数据发布节点和 classic/enhanced 校验类型，不猜测未登记 ID 的长度。
+- 继续使用现有串口连接管理、容量 256 的 RX/TX 队列及单消费者。应用帧服务提供发布完整帧和发送 Header 后等待同 ID 有效帧；等待锁不占用底层接收线程。
+- 接收支持分段和连续多帧、数据内 `55 AA` 标记、PID/checksum 校验、错误后重同步及不完整帧超时。错误只记日志，不完成正常读取。
+- 应用读取支持超时、取消、断开终止和连接代次检查；重连后不继续发送旧的排队读取。释放服务及主窗口退出时结束等待并释放新建帧通道计时器和串口工作线程。
+- 报文日志改为 LIN 字段：Break、Sync、ID、PID、Data 长度、Data、checksum 类型和校验状态；筛选改为方向/类型/ID/PID。保留既有 UI 批处理、保留上限、窗口复用和未提交的隐藏恢复修复。
+- 电机具体应用帧表和信号布局尚未提供，启动帧表为空；原设备读取、位置动作、校准和 STOP 按钮暂时禁用并显示原因，本地 OPEN 配置及串口设置继续可用。没有沿用旧命令或借用 BMW 大灯帧 ID。
+- 当前接收适配按完整 `55 AA + Sync + PID + Data + Checksum` 实现；实际返回、Header 回显、错误状态、帧槽仲裁和周期调度仍需中间件接口确认。串口写入成功不代表总线发送或电机动作完成。
+- 重新编写 `PROTOCOL.md`，记录现行协议、模块/API、应用发布/读取流程、接收恢复策略、后续诊断边界和待确认项。
+- 隔离协议检查：37 项通过，覆盖已知向量、分段/连续帧、标记出现在数据区、错误恢复、读取串行、超时/取消、立即响应、断开重连和释放；使用模拟串口，未向主项目引入测试依赖。
+- WPF 隔离输出构建通过，0 个警告、0 个错误。中间件和电机的实际收发、周期要求及页面信号联调为 `pending test`。
+
+### GitHub 版本和回退记录
+
+- 将升级前已有但未提交的日志窗口隐藏恢复修复单独保存为提交 `15dbc2565e37c5ab89fe72b0bc19194b2b042b57`，保留旧协议，作为本次迁移的直接父版本。
+- 回退基线标签：`pre-lin-application-20261010`，包含旧协议和上述日志修复。
+- 本次 LIN 应用帧框架标签：`lin-application-framework-20261010`，具体电机帧和业务绑定仍待确认。
+- 发布目标为 `BinM-mary/monter` 的 `main` 分支；两个标签和源码提交一同上传。上传结果及提交哈希由 Git 远端核对。
+- 新增 `VERSION_HISTORY.md`，记录版本用途和保留提交历史的回退方式；不使用强制推送覆盖旧版本。
+
+### 当前范围
+
+- 本阶段完成共用单帧底层及通用应用帧接口，具体电机业务绑定等待帧表。
+- 诊断事务、TP 分包组包、诊断超时/调度和升级流程未在本阶段实现；后续通过同一个 `LinFrameChannel` 扩展。
+
 ## 2026-09-22
 
 ### 修复日志窗口延迟刷新导致的 CollectionView 异常

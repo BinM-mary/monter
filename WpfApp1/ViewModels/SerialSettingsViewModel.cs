@@ -10,7 +10,7 @@ namespace WpfApp1.ViewModels;
 /// <summary>
 /// 管理串口枚举、编辑与应用。连接、重连等通信策略由后续通信层负责。
 /// </summary>
-public partial class SerialSettingsViewModel : ObservableObject
+public partial class SerialSettingsViewModel : ObservableObject, IDisposable
 {
     private static readonly TimeSpan PortCheckInactivityThreshold = TimeSpan.FromSeconds(3);
 
@@ -177,6 +177,11 @@ public partial class SerialSettingsViewModel : ObservableObject
         portMonitoringCancellationSource?.Cancel();
         portMonitoringCancellationSource?.Dispose();
         portMonitoringCancellationSource = null;
+    }
+
+    public void Dispose()
+    {
+        StopPortMonitoring();
     }
 
     private async Task MonitorAvailablePortsAsync(CancellationToken cancellationToken)

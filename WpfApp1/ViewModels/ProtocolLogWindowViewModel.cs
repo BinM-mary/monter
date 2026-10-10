@@ -58,9 +58,9 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         AllFilterText
     ];
 
-    public ObservableCollection<string> CommandFilterOptions { get; } = [AllFilterText];
+    public ObservableCollection<string> FrameIdFilterOptions { get; } = [AllFilterText];
 
-    public ObservableCollection<string> SubCommandFilterOptions { get; } = [AllFilterText];
+    public ObservableCollection<string> ProtectedIdFilterOptions { get; } = [AllFilterText];
 
     [ObservableProperty]
     private string? selectedDirectionFilter = AllFilterText;
@@ -69,10 +69,10 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     private string? selectedTypeFilter = AllFilterText;
 
     [ObservableProperty]
-    private string? selectedCommandFilter = AllFilterText;
+    private string? selectedFrameIdFilter = AllFilterText;
 
     [ObservableProperty]
-    private string? selectedSubCommandFilter = AllFilterText;
+    private string? selectedProtectedIdFilter = AllFilterText;
 
     [ObservableProperty]
     private LogRetentionOption selectedRetentionOption = retentionOptions[0];
@@ -128,12 +128,12 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         HandleFilterSelectionChanged();
     }
 
-    partial void OnSelectedCommandFilterChanged(string? value)
+    partial void OnSelectedFrameIdFilterChanged(string? value)
     {
         HandleFilterSelectionChanged();
     }
 
-    partial void OnSelectedSubCommandFilterChanged(string? value)
+    partial void OnSelectedProtectedIdFilterChanged(string? value)
     {
         HandleFilterSelectionChanged();
     }
@@ -154,8 +154,8 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     {
         SelectedDirectionFilter = AllFilterText;
         SelectedTypeFilter = AllFilterText;
-        SelectedCommandFilter = AllFilterText;
-        SelectedSubCommandFilter = AllFilterText;
+        SelectedFrameIdFilter = AllFilterText;
+        SelectedProtectedIdFilter = AllFilterText;
         RefreshFilteredEntries();
     }
 
@@ -228,21 +228,21 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
             {
                 var directionOptions = GetCandidateFilterValues(FilterDimension.Direction);
                 var typeOptions = GetCandidateFilterValues(FilterDimension.Type);
-                var commandOptions = GetCandidateFilterValues(FilterDimension.Command);
-                var subCommandOptions = GetCandidateFilterValues(FilterDimension.SubCommand);
+                var frameIdOptions = GetCandidateFilterValues(FilterDimension.FrameId);
+                var protectedIdOptions = GetCandidateFilterValues(FilterDimension.ProtectedId);
 
                 var selectionChanged = EnsureSelections(
                     directionOptions,
                     typeOptions,
-                    commandOptions,
-                    subCommandOptions);
+                    frameIdOptions,
+                    protectedIdOptions);
                 selectionWasChanged |= selectionChanged;
 
                 // 先校正选择值，再增量调整选项，避免清空集合时 WPF 暂时产生 null。
                 ReplaceOptions(DirectionFilterOptions, directionOptions);
                 ReplaceOptions(TypeFilterOptions, typeOptions);
-                ReplaceOptions(CommandFilterOptions, commandOptions);
-                ReplaceOptions(SubCommandFilterOptions, subCommandOptions);
+                ReplaceOptions(FrameIdFilterOptions, frameIdOptions);
+                ReplaceOptions(ProtectedIdFilterOptions, protectedIdOptions);
 
                 if (!selectionChanged)
                 {
@@ -276,8 +276,8 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
             {
                 FilterDimension.Direction => pair.Key.Direction,
                 FilterDimension.Type => pair.Key.Type,
-                FilterDimension.Command => pair.Key.Command,
-                FilterDimension.SubCommand => pair.Key.SubCommand,
+                FilterDimension.FrameId => pair.Key.FrameId,
+                FilterDimension.ProtectedId => pair.Key.ProtectedId,
                 _ => "—"
             };
 
@@ -298,17 +298,17 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
                 || MatchesFilter(SelectedDirectionFilter, key.Direction))
             && (excludedDimension == FilterDimension.Type
                 || MatchesFilter(SelectedTypeFilter, key.Type))
-            && (excludedDimension == FilterDimension.Command
-                || MatchesFilter(SelectedCommandFilter, key.Command))
-            && (excludedDimension == FilterDimension.SubCommand
-                || MatchesFilter(SelectedSubCommandFilter, key.SubCommand));
+            && (excludedDimension == FilterDimension.FrameId
+                || MatchesFilter(SelectedFrameIdFilter, key.FrameId))
+            && (excludedDimension == FilterDimension.ProtectedId
+                || MatchesFilter(SelectedProtectedIdFilter, key.ProtectedId));
     }
 
     private bool EnsureSelections(
         IEnumerable<string> directionOptions,
         IEnumerable<string> typeOptions,
-        IEnumerable<string> commandOptions,
-        IEnumerable<string> subCommandOptions)
+        IEnumerable<string> frameIdOptions,
+        IEnumerable<string> protectedIdOptions)
     {
         var selectionChanged = false;
         selectionChanged |= EnsureSelection(
@@ -320,13 +320,13 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
             typeOptions,
             value => SelectedTypeFilter = value);
         selectionChanged |= EnsureSelection(
-            SelectedCommandFilter,
-            commandOptions,
-            value => SelectedCommandFilter = value);
+            SelectedFrameIdFilter,
+            frameIdOptions,
+            value => SelectedFrameIdFilter = value);
         selectionChanged |= EnsureSelection(
-            SelectedSubCommandFilter,
-            subCommandOptions,
-            value => SelectedSubCommandFilter = value);
+            SelectedProtectedIdFilter,
+            protectedIdOptions,
+            value => SelectedProtectedIdFilter = value);
         return selectionChanged;
     }
 
@@ -406,8 +406,8 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
         return MatchesFilter(SelectedDirectionFilter, entry.DirectionText)
             && MatchesFilter(SelectedTypeFilter, entry.FrameTypeText)
-            && MatchesFilter(SelectedCommandFilter, entry.CommandText)
-            && MatchesFilter(SelectedSubCommandFilter, entry.SubCommandText);
+            && MatchesFilter(SelectedFrameIdFilter, entry.FrameIdText)
+            && MatchesFilter(SelectedProtectedIdFilter, entry.ProtectedIdText);
     }
 
     private void RefreshFilteredEntries()
@@ -458,8 +458,8 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         IncrementCount(filterValueCounts, new FilterValueKey(
             entry.DirectionText,
             entry.FrameTypeText,
-            entry.CommandText,
-            entry.SubCommandText));
+            entry.FrameIdText,
+            entry.ProtectedIdText));
     }
 
     private void RemoveFilterValues(CommunicationLogEntry entry)
@@ -467,8 +467,8 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         DecrementCount(filterValueCounts, new FilterValueKey(
             entry.DirectionText,
             entry.FrameTypeText,
-            entry.CommandText,
-            entry.SubCommandText));
+            entry.FrameIdText,
+            entry.ProtectedIdText));
     }
 
     private static void IncrementCount(
@@ -511,15 +511,15 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     {
         Direction,
         Type,
-        Command,
-        SubCommand
+        FrameId,
+        ProtectedId
     }
 
     private readonly record struct FilterValueKey(
         string Direction,
         string Type,
-        string Command,
-        string SubCommand);
+        string FrameId,
+        string ProtectedId);
 
     public sealed record LogRetentionOption(string DisplayText, int Limit);
 }
