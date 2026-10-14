@@ -47,10 +47,10 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     public ObservableCollection<MotorPresetViewModel> EditablePresets { get; }
 
-    // 新电机帧 ID 和信号布局接入后再启用设备操作。
+    // 0x33 状态帧轮询已接入；设备读取/动作按钮的业务绑定待后续阶段实现。
     public bool IsDeviceProtocolAvailable => false;
 
-    public string ProtocolStatusText => "LIN 应用帧定义待配置，设备操作暂不可用";
+    public string ProtocolStatusText => "应用帧 0x33 轮询已接入，设备业务绑定待实现";
 
     public bool IsMotorCommandAvailable =>
         IsDeviceProtocolAvailable && SerialSettings.IsConnected && HasInitializationSteps;

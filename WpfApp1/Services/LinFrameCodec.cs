@@ -9,6 +9,8 @@ public static class LinFrameCodec
     public const byte SyncByte = 0x55;
     public const int HeaderLength = 4;
     public const int FixedFrameLength = HeaderLength + 1;
+    public const int ReadRequestLength = HeaderLength + 1;
+    public const byte ReadRequestFlag = 0x00;
 
     public static byte CalculateProtectedId(byte id)
     {
@@ -27,14 +29,45 @@ public static class LinFrameCodec
         return CalculateProtectedId((byte)(protectedId & 0x3F)) == protectedId;
     }
 
-    public static byte[] CreateHeader(byte id)
+    /// <summary>构造读取请求：55 AA 55 PID 00。末尾 00 为双方串口接口约定的读取标识，不是校验值。</summary>
+    public static byte[] CreateReadRequest(byte id)
     {
         if (id > 0x3D)
         {
             throw new ArgumentOutOfRangeException(nameof(id), "0x3E/0x3F 为保留 ID。");
         }
 
-        return [BreakFirstByte, BreakSecondByte, SyncByte, CalculateProtectedId(id)];
+        var raw = new byte[ReadRequestLength];
+        CreateHeaderBytes(id).CopyTo(raw, 0);
+        raw[HeaderLength] = ReadRequestFlag;
+        return raw;
+    }
+
+    /// <summary>
+    /// 从"DATA + Checksum"回复中反算 PID。算法为增强型校验的逆运算：
+    /// foldedSum = (~CS) &amp; 0xFF；candidatePid = 非负模 255(foldedSum - dataSum)。
+    /// 结果需另行通过 P0/P1 奇偶自洽与帧表匹配才可接受。
+    /// </summary>
+    public static bool TryRecoverProtectedId(ReadOnlySpan<byte> rawReply, out byte protectedId)
+    {
+        protectedId = 0;
+        if (rawReply.Length < 2)
+        {
+            return false;
+        }
+
+        var checksum = rawReply[^1];
+        var data = rawReply[..^1];
+        var foldedSum = ~checksum & 0xFF;
+        int dataSum = 0;
+        foreach (var value in data)
+        {
+            dataSum += value;
+        }
+
+        var candidate = ((foldedSum - dataSum) % 255 + 255) % 255;
+        protectedId = (byte)candidate;
+        return true;
     }
 
     public static byte[] CreateFrame(LinFrameDefinition definition, ReadOnlySpan<byte> data)
@@ -46,10 +79,20 @@ public static class LinFrameCodec
         }
 
         var rawFrame = new byte[FixedFrameLength + data.Length];
-        CreateHeader(definition.Id).CopyTo(rawFrame, 0);
+        CreateHeaderBytes(definition.Id).CopyTo(rawFrame, 0);
         data.CopyTo(rawFrame.AsSpan(HeaderLength));
         rawFrame[^1] = CalculateChecksum(rawFrame[3], data, definition.ChecksumType);
         return rawFrame;
+    }
+
+    private static byte[] CreateHeaderBytes(byte id)
+    {
+        if (id > 0x3D)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), "0x3E/0x3F 为保留 ID。");
+        }
+
+        return [BreakFirstByte, BreakSecondByte, SyncByte, CalculateProtectedId(id)];
     }
 
     public static byte CalculateChecksum(

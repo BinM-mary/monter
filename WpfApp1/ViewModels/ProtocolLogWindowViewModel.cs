@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows.Data;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WpfApp1.Models;
@@ -24,6 +25,7 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     private readonly Dictionary<FilterValueKey, int> filterValueCounts = new();
     private bool updatingFilterOptions;
     private bool updatesSuspended;
+    private bool filterOptionsRefreshPending;
 
     public ProtocolLogWindowViewModel(ICommunicationLogService communicationLog)
     {
@@ -179,7 +181,7 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
                     }
                 }
 
-                RefreshFilterOptions();
+                ScheduleFilterOptionsRefresh();
                 NotifyFilteredEntriesChanged();
                 break;
             case NotifyCollectionChangedAction.Remove:
@@ -191,7 +193,7 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
                     }
                 }
 
-                RefreshFilterOptions();
+                ScheduleFilterOptionsRefresh();
                 break;
             default:
                 RebuildFilterValueCounts();
@@ -210,6 +212,32 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
         RefreshFilteredEntries();
         RefreshFilterOptions();
+    }
+
+    /// <summary>
+    /// 合并多个条目变更触发的筛选选项刷新：同一调度周期内只重建一次。
+    /// 逐条 Add/Remove 通知下避免错误风暴等突发批量时重复执行四维级联重建。
+    /// </summary>
+    private void ScheduleFilterOptionsRefresh()
+    {
+        if (updatesSuspended || filterOptionsRefreshPending)
+        {
+            return;
+        }
+
+        filterOptionsRefreshPending = true;
+        _ = System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+            DispatcherPriority.Background,
+            new Action(() =>
+            {
+                filterOptionsRefreshPending = false;
+                if (updatesSuspended)
+                {
+                    return;
+                }
+
+                RefreshFilterOptions();
+            }));
     }
 
     private void RefreshFilterOptions()

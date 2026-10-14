@@ -8,7 +8,11 @@ public enum CommunicationLogDirection
     Received
 }
 
-/// <summary>LIN 串口帧/帧头或接收错误记录；不再解释旧 CMD/SubCmd/LEN/XOR 协议。</summary>
+/// <summary>
+/// 报文记录。区分三种 LIN 串口形态：读取请求（55 AA 55 PID 00）、
+/// 读取回复（DATA + Checksum，PID/ID 为反算恢复值，须标注）、
+/// 主节点发布完整帧（55 AA 55 PID DATA CS）；无法识别的按错误条目显示原始字节。
+/// </summary>
 public sealed class CommunicationLogEntry
 {
     public CommunicationLogEntry(
@@ -37,17 +41,74 @@ public sealed class CommunicationLogEntry
         }
 
         RawDataText = FormatBytes(bytes);
-        BreakText = bytes.Length >= 2 ? FormatBytes(bytes.AsSpan(0, 2)) : "—";
-        SyncText = bytes.Length >= 3 ? FormatByte(bytes[2]) : "—";
-        ProtectedIdText = bytes.Length >= 4 ? FormatByte(bytes[3]) : "—";
-        FrameIdText = bytes.Length >= 4 ? FormatByte((byte)(bytes[3] & 0x3F)) : "—";
-        ChecksumTypeText = definition?.ChecksumType.ToString() ?? "—";
-
         var hasHeader = bytes.Length >= LinFrameCodec.HeaderLength
             && bytes[0] == LinFrameCodec.BreakFirstByte
             && bytes[1] == LinFrameCodec.BreakSecondByte
             && bytes[2] == LinFrameCodec.SyncByte;
-        var validPid = hasHeader && LinFrameCodec.IsProtectedIdValid(bytes[3])
+
+        if (error is not null)
+        {
+            FrameTypeText = "错误";
+            ChecksumStatusText = error;
+            return;
+        }
+
+        // 发送的读取请求：55 AA 55 PID 00。末尾 00 是读取标识，不是校验值，不显示为 Checksum。
+        if (direction == CommunicationLogDirection.Sent
+            && hasHeader
+            && bytes.Length == LinFrameCodec.ReadRequestLength
+            && bytes[4] == LinFrameCodec.ReadRequestFlag)
+        {
+            BreakText = FormatBytes(bytes.AsSpan(0, 2));
+            SyncText = FormatByte(bytes[2]);
+            ProtectedIdText = FormatByte(bytes[3]);
+            FrameIdText = FormatByte((byte)(bytes[3] & 0x3F));
+            FrameTypeText = "读取请求";
+            DataLengthText = "0 bytes";
+            ChecksumStatusText = "读取标识 00，无校验";
+            return;
+        }
+
+        // 接收的读取回复：只有 DATA + Checksum。PID 与 ID 是反算恢复值，须标注，不是报文中的独立字段。
+        if (!hasHeader && definition is not null && bytes.Length >= 2)
+        {
+            if (LinFrameCodec.TryRecoverProtectedId(bytes, out var protectedId)
+                && LinFrameCodec.CalculateChecksum(
+                    protectedId,
+                    bytes.AsSpan(0, bytes.Length - 1),
+                    definition.ChecksumType) == bytes[^1])
+            {
+                FrameTypeText = "回复帧";
+                ProtectedIdText = FormatByte(protectedId) + "（恢复）";
+                FrameIdText = FormatByte((byte)(protectedId & 0x3F)) + "（恢复）";
+                DataLengthText = $"{bytes.Length - 1} bytes";
+                PayloadText = FormatBytes(bytes.AsSpan(0, bytes.Length - 1));
+                ChecksumText = FormatByte(bytes[^1]);
+                ChecksumTypeText = definition.ChecksumType.ToString();
+                ChecksumStatusText = "通过";
+                return;
+            }
+
+            FrameTypeText = "错误";
+            ChecksumStatusText = "无法从 DATA/Checksum 恢复有效 PID";
+            return;
+        }
+
+        if (!hasHeader)
+        {
+            FrameTypeText = "错误";
+            ChecksumStatusText = "无 LIN 帧头，且不构成有效回复";
+            return;
+        }
+
+        // 主节点发布的完整帧：55 AA 55 PID DATA CS。
+        BreakText = FormatBytes(bytes.AsSpan(0, 2));
+        SyncText = FormatByte(bytes[2]);
+        ProtectedIdText = FormatByte(bytes[3]);
+        FrameIdText = FormatByte((byte)(bytes[3] & 0x3F));
+        ChecksumTypeText = definition?.ChecksumType.ToString() ?? "—";
+
+        var validPid = LinFrameCodec.IsProtectedIdValid(bytes[3])
             && (bytes[3] & 0x3F) <= 0x3D;
         var isHeaderOnly = bytes.Length == LinFrameCodec.HeaderLength;
         if (!isHeaderOnly && bytes.Length >= LinFrameCodec.FixedFrameLength)
@@ -58,17 +119,7 @@ public sealed class CommunicationLogEntry
             ChecksumText = FormatByte(bytes[^1]);
         }
 
-        if (error is not null)
-        {
-            FrameTypeText = "错误";
-            ChecksumStatusText = error;
-        }
-        else if (!hasHeader)
-        {
-            FrameTypeText = "错误";
-            ChecksumStatusText = "帧头/Sync 错误或不完整";
-        }
-        else if (!validPid)
+        if (!validPid)
         {
             FrameTypeText = "错误";
             ChecksumStatusText = "PID 错误或保留 ID";

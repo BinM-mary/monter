@@ -5,13 +5,15 @@ namespace WpfApp1.Services;
 
 /// <summary>
 /// 共用的 LIN 单帧通道。应用帧与后续诊断均复用串口队列和有效帧事件。
-/// Send 完成仅代表串口写入完成，不代表中间件总线发送或电机动作完成。
+/// 读取请求为 5 字节（55 AA 55 PID 00）；回复只有 DATA + Checksum，
+/// 由 LinReadReplyParser 反算 PID/ID 后分发。Send 完成仅代表串口写入完成，
+/// 不代表中间件总线发送或电机动作完成。
 /// </summary>
 public sealed class LinFrameChannel : IDisposable
 {
     private readonly ISerialPortConnectionService connectionService;
     private readonly ICommunicationLogService communicationLog;
-    private readonly LinFrameParser parser;
+    private readonly LinReadReplyParser parser;
     private readonly object stateLock = new();
     private readonly Timer receiveTimer;
     private readonly TimeSpan frameAssemblyTimeout;
@@ -33,7 +35,7 @@ public sealed class LinFrameChannel : IDisposable
             throw new ArgumentOutOfRangeException(nameof(frameAssemblyTimeout));
         }
 
-        parser = new LinFrameParser(catalog);
+        parser = new LinReadReplyParser(catalog);
         parser.FrameReceived += HandleFrameReceived;
         parser.FrameRejected += HandleFrameRejected;
         isConnected = connectionService.ConnectedPortName is not null;
@@ -46,10 +48,16 @@ public sealed class LinFrameChannel : IDisposable
     public event Action<LinFrame>? FrameReceived;
     public event Action<bool>? ConnectionStateChanged;
 
-    public Task SendHeaderAsync(byte id, CancellationToken cancellationToken = default)
+    /// <summary>发送读取请求（55 AA 55 PID 00），不等待回复。</summary>
+    public Task SendReadRequestAsync(byte id, CancellationToken cancellationToken = default)
     {
         var definition = Catalog.Get(id);
-        return WriteAsync(LinFrameCodec.CreateHeader(id), definition, cancellationToken);
+        if (definition.IsDiagnostic || definition.Publisher != LinPublisher.Slave)
+        {
+            throw new InvalidOperationException($"帧 0x{id:X2} 不是从节点应用帧，不能作为读取目标。");
+        }
+
+        return WriteAsync(LinFrameCodec.CreateReadRequest(id), definition, cancellationToken);
     }
 
     public Task SendFrameAsync(byte id, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)

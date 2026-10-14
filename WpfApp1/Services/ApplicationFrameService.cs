@@ -66,7 +66,7 @@ public sealed class ApplicationFrameService : IDisposable
                 pendingRead = request;
             }
 
-            await channel.SendHeaderAsync(id, linkedCancellation.Token).ConfigureAwait(false);
+            await channel.SendReadRequestAsync(id, linkedCancellation.Token).ConfigureAwait(false);
             return await request.Completion.Task
                 .WaitAsync(responseTimeout, linkedCancellation.Token).ConfigureAwait(false);
         }

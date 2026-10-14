@@ -174,17 +174,15 @@ public sealed class CommunicationLogService : ICommunicationLogService
                 RemoveOldestItems(removeCount);
             }
 
+            // 逐条 Add：ListCollectionView 对单元素事件做增量更新，
+            // 只过滤新条目、不重建视图，虚拟化和滚动状态保持不变。
+            // 此前每批统一发一次 Reset，视图会对全部条目（最多 5000/10000 条）
+            // 重新执行筛选并整表重建，100 ms 轮询下每 50 ms 一次，
+            // 报文窗口打开时明显卡顿，窗口隐藏时也在后台全量刷新。
             foreach (var entry in itemsToAdd)
             {
-                Items.Add(entry);
+                Add(entry);
             }
-
-            OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
-            OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
-
-            // WPF 的 ListCollectionView 不稳定支持包含多个元素的 Add 范围事件，
-            // 统一使用一次 Reset，避免批量报文进入日志窗口时抛异常。
-            OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
         }
 
         public void TrimTo(int maximumCount)
@@ -195,7 +193,18 @@ public sealed class CommunicationLogService : ICommunicationLogService
                 return;
             }
 
-            RemoveOldestItems(removeCount);
+            // 保留条数调整是罕见操作，直接批量移除后整体 Reset 一次即可。
+            if (Items is List<CommunicationLogEntry> itemList)
+            {
+                itemList.RemoveRange(0, removeCount);
+            }
+            else
+            {
+                for (var index = 0; index < removeCount; index++)
+                {
+                    Items.RemoveAt(0);
+                }
+            }
 
             OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
             OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
@@ -204,15 +213,11 @@ public sealed class CommunicationLogService : ICommunicationLogService
 
         private void RemoveOldestItems(int removeCount)
         {
-            if (Items is List<CommunicationLogEntry> itemList)
-            {
-                itemList.RemoveRange(0, removeCount);
-                return;
-            }
-
+            // 逐条 RemoveAt(0)：每条发出单元素 Remove 事件，视图增量更新。
+            // 批量最多 200 条，列表头移除为内存搬移，成本可忽略。
             for (var index = 0; index < removeCount; index++)
             {
-                Items.RemoveAt(0);
+                RemoveAt(0);
             }
         }
     }
