@@ -29,7 +29,7 @@ public sealed class LinFrameChannel : IDisposable
         this.connectionService = connectionService ?? throw new ArgumentNullException(nameof(connectionService));
         this.communicationLog = communicationLog ?? throw new ArgumentNullException(nameof(communicationLog));
         Catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
-        this.frameAssemblyTimeout = frameAssemblyTimeout ?? TimeSpan.FromSeconds(1);
+        this.frameAssemblyTimeout = frameAssemblyTimeout ?? TimeSpan.FromMilliseconds(50);
         if (this.frameAssemblyTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(frameAssemblyTimeout));
@@ -41,7 +41,8 @@ public sealed class LinFrameChannel : IDisposable
         isConnected = connectionService.ConnectedPortName is not null;
         connectionService.BytesReceived += HandleBytesReceived;
         connectionService.ConnectionStateChanged += HandleConnectionStateChanged;
-        receiveTimer = new Timer(ExpirePartialFrame, null, 100, 100);
+        // 10ms 检查一次：缓存非空且超过 50ms 未收到新字节即丢弃残缺回复。
+        receiveTimer = new Timer(ExpirePartialFrame, null, 10, 10);
     }
 
     public LinFrameCatalog Catalog { get; }
@@ -69,6 +70,26 @@ public sealed class LinFrameChannel : IDisposable
         }
 
         return WriteAsync(LinFrameCodec.CreateFrame(definition, data.Span), definition, cancellationToken);
+    }
+
+    /// <summary>
+    /// 发送写入应用帧（55 AA 55 PID 08 DATA CS）：08 为写入标识，不参与校验；
+    /// Checksum 与增强型校验一致，以 PID（由原始 ID 计算）为种子累加全部 DATA。
+    /// </summary>
+    public Task SendWriteRequestAsync(byte id, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    {
+        var definition = Catalog.Get(id);
+        if (definition.IsDiagnostic || definition.Publisher != LinPublisher.Master)
+        {
+            throw new InvalidOperationException($"帧 0x{id:X2} 不是主节点应用帧，不能作为写入目标。");
+        }
+
+        if (data.Length != definition.DataLength)
+        {
+            throw new ArgumentException($"帧 0x{id:X2} 必须包含 {definition.DataLength} 个数据字节。", nameof(data));
+        }
+
+        return WriteAsync(LinFrameCodec.CreateWriteRequest(id, data.Span), definition, cancellationToken);
     }
 
     public void Dispose()

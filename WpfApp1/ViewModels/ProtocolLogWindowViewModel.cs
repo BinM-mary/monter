@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -27,12 +26,23 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     private bool updatesSuspended;
     private bool filterOptionsRefreshPending;
 
+    // 暂停显示期间新条目进入缓冲，显示集合保持不变；恢复时一次性补入。
+    private readonly ObservableCollection<CommunicationLogEntry> displayedEntries = [];
+    private readonly List<CommunicationLogEntry> pausedPendingEntries = [];
+
     public ProtocolLogWindowViewModel(ICommunicationLogService communicationLog)
     {
         ArgumentNullException.ThrowIfNull(communicationLog);
 
         this.communicationLog = communicationLog;
-        filteredEntries = new ListCollectionView((IList)communicationLog.Entries);
+        // 视图绑定镜像集合而非服务集合本身：否则暂停显示时 ListView 仍会随
+        // 源集合的 Add 事件自动插入新行，无法真正冻结画面。
+        foreach (var entry in communicationLog.Entries)
+        {
+            displayedEntries.Add(entry);
+        }
+
+        filteredEntries = new ListCollectionView(displayedEntries);
         filteredEntries.Filter = FilterLogEntry;
         selectedRetentionOption = retentionOptions.FirstOrDefault(option =>
             option.Limit == communicationLog.RetentionLimit)
@@ -79,6 +89,12 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     [ObservableProperty]
     private LogRetentionOption selectedRetentionOption = retentionOptions[0];
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PauseButtonText))]
+    private bool isPaused;
+
+    public string PauseButtonText => IsPaused ? "继续显示" : "暂停显示";
+
     public event EventHandler? FilteredEntriesChanged;
 
     public void SuspendUpdates()
@@ -101,6 +117,14 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         try
         {
             // 隐藏期间日志仍然保存在通信日志集合中；重新显示时重建筛选状态并主动刷新一次视图。
+            // 同时把镜像集合重新同步到源集合（隐藏期间的 Add 事件被挂起丢弃了）。
+            pausedPendingEntries.Clear();
+            displayedEntries.Clear();
+            foreach (var entry in communicationLog.Entries)
+            {
+                displayedEntries.Add(entry);
+            }
+
             RebuildFilterValueCounts();
             RefreshFilterOptions();
         }
@@ -151,6 +175,26 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
         communicationLog.Clear();
     }
 
+    /// <summary>
+    /// 暂停/继续显示：暂停时新报文只进缓冲，列表冻结；恢复时补入缓冲条目并刷新。
+    /// 后台日志记录不受暂停影响。
+    /// </summary>
+    [RelayCommand]
+    private void TogglePause()
+    {
+        IsPaused = !IsPaused;
+        if (!IsPaused)
+        {
+            foreach (var entry in pausedPendingEntries)
+            {
+                displayedEntries.Add(entry);
+            }
+
+            pausedPendingEntries.Clear();
+            RefreshFilteredEntries();
+        }
+    }
+
     [RelayCommand]
     private void ResetFilters()
     {
@@ -178,11 +222,23 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
                     foreach (var entry in e.NewItems.OfType<CommunicationLogEntry>())
                     {
                         AddFilterValues(entry);
+                        if (IsPaused)
+                        {
+                            pausedPendingEntries.Add(entry);
+                        }
+                        else
+                        {
+                            displayedEntries.Add(entry);
+                        }
                     }
                 }
 
                 ScheduleFilterOptionsRefresh();
-                NotifyFilteredEntriesChanged();
+                if (!IsPaused)
+                {
+                    NotifyFilteredEntriesChanged();
+                }
+
                 break;
             case NotifyCollectionChangedAction.Remove:
                 if (e.OldItems is not null)
@@ -190,12 +246,23 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
                     foreach (var entry in e.OldItems.OfType<CommunicationLogEntry>())
                     {
                         RemoveFilterValues(entry);
+                        // 保留条数裁剪掉的最旧条目可能在显示集合，也可能还在暂停缓冲里。
+                        displayedEntries.Remove(entry);
+                        pausedPendingEntries.Remove(entry);
                     }
                 }
 
                 ScheduleFilterOptionsRefresh();
                 break;
             default:
+                // Reset（清空或保留条数整体裁剪）：镜像集合与缓冲一并重建。
+                pausedPendingEntries.Clear();
+                displayedEntries.Clear();
+                foreach (var entry in communicationLog.Entries)
+                {
+                    displayedEntries.Add(entry);
+                }
+
                 RebuildFilterValueCounts();
                 RefreshFilterOptions();
                 NotifyFilteredEntriesChanged();

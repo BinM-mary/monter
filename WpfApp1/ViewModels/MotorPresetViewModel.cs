@@ -20,21 +20,15 @@ public sealed partial class MotorPresetViewModel : ObservableObject
     public string DisplayName { get; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(Percentage))]
     [NotifyPropertyChangedFor(nameof(Summary))]
     private int positionSteps;
 
-    public double Percentage => totalTravelSteps == 0
-        ? 0
-        : PositionSteps * 100d / totalTravelSteps;
-
-    public string Summary => $"已保存：{PositionSteps} step · {Percentage:0.0}%";
+    public string Summary => $"已保存：{PositionSteps} step";
 
     public void SetTotalTravelSteps(int value)
     {
         totalTravelSteps = value;
         PositionSteps = Math.Clamp(PositionSteps, 0, totalTravelSteps);
-        OnPropertyChanged(nameof(Percentage));
         OnPropertyChanged(nameof(Summary));
     }
 

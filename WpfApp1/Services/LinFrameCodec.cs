@@ -11,6 +11,7 @@ public static class LinFrameCodec
     public const int FixedFrameLength = HeaderLength + 1;
     public const int ReadRequestLength = HeaderLength + 1;
     public const byte ReadRequestFlag = 0x00;
+    public const byte WriteRequestFlag = 0x08;
 
     public static byte CalculateProtectedId(byte id)
     {
@@ -41,6 +42,52 @@ public static class LinFrameCodec
         CreateHeaderBytes(id).CopyTo(raw, 0);
         raw[HeaderLength] = ReadRequestFlag;
         return raw;
+    }
+
+    /// <summary>
+    /// 构造写入应用帧：55 AA 55 PID 08 DATA CS。
+    /// 08 为双方串口接口约定的写入标识（不参与校验）；
+    /// Checksum 与 LIN 增强型校验一致：以 PID（由原始 ID 计算）为种子累加全部 DATA，
+    /// 进位折叠后取反，与中间件 Lin_CheckSum(id, pData, len) 结果相同。
+    /// </summary>
+    public static byte[] CreateWriteRequest(byte id, ReadOnlySpan<byte> data)
+    {
+        if (id > 0x3D)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), "0x3E/0x3F 为保留 ID。");
+        }
+
+        var raw = new byte[HeaderLength + 1 + data.Length + 1];
+        CreateHeaderBytes(id).CopyTo(raw, 0);
+        raw[HeaderLength] = WriteRequestFlag;
+        data.CopyTo(raw.AsSpan(HeaderLength + 1));
+        raw[^1] = CalculateWriteChecksum(id, data);
+        return raw;
+    }
+
+    /// <summary>
+    /// 写入帧 Checksum：与标准增强型校验相同，以 PID（由原始 6 位 ID 计算得到）为种子，
+    /// 只累加全部 DATA（不含写入标识 08），每步进位折叠（&gt;0xFF 减 0xFF），最后取反。
+    /// 中间件 Lin_CheckSum 内部同样以 Lin_CheckPID(id) 为种子，结果一致。
+    /// </summary>
+    public static byte CalculateWriteChecksum(byte id, ReadOnlySpan<byte> data)
+    {
+        if (id > 0x3F)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), "帧 ID 为 6 位，不能传入 PID。");
+        }
+
+        var sum = (int)CalculateProtectedId(id);
+        foreach (var value in data)
+        {
+            sum += value;
+            if (sum > 0xFF)
+            {
+                sum -= 0xFF;
+            }
+        }
+
+        return (byte)(~sum & 0xFF);
     }
 
     /// <summary>

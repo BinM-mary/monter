@@ -26,13 +26,15 @@ public partial class ActuatorDebugViewModel : ObservableObject
         };
 
     private readonly MotorPresetStorageService motorPresetStorage = new();
+    private readonly MotorCommandService motorCommands;
     private CancellationTokenSource? deviceInfoReadNotificationCancellation;
-    private bool synchronizingTargetPosition;
 
     public ActuatorDebugViewModel(
-        SerialSettingsViewModel serialSettings)
+        SerialSettingsViewModel serialSettings,
+        MotorCommandService motorCommands)
     {
         SerialSettings = serialSettings;
+        this.motorCommands = motorCommands ?? throw new ArgumentNullException(nameof(motorCommands));
         SerialSettings.PropertyChanged += SerialSettings_PropertyChanged;
         TotalTravelSteps = DefaultTotalTravelSteps;
         ClearDeviceInfoValues();
@@ -47,47 +49,39 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     public ObservableCollection<MotorPresetViewModel> EditablePresets { get; }
 
-    // 0x33 状态帧轮询已接入；设备读取/动作按钮的业务绑定待后续阶段实现。
+    // 0x33 状态显示与 0x15 控制写入均已接入；"读取设备信息"的设备信息读取协议仍未定义，保持禁用。
     public bool IsDeviceProtocolAvailable => false;
 
-    public string ProtocolStatusText => "应用帧 0x33 轮询已接入，设备业务绑定待实现";
+    public string ProtocolStatusText => "0x33 状态显示 + 0x15 控制写入已接入；设备信息读取待定义";
 
-    public bool IsMotorCommandAvailable =>
-        IsDeviceProtocolAvailable && SerialSettings.IsConnected && HasInitializationSteps;
+    // 0x15 写入帧由轮询服务每 100 ms 发送，串口连接后即可下发控制指令。
+    public bool IsMotorCommandAvailable => SerialSettings.IsConnected;
 
-    public bool IsSerialCommandAvailable => IsDeviceProtocolAvailable && SerialSettings.IsConnected;
+    public bool IsSerialCommandAvailable => SerialSettings.IsConnected;
 
-    public bool IsCurrentPositionMemoryAvailable =>
-        IsMotorCommandAvailable && HasCurrentPosition;
+    // "记忆当前位置"只保存到本机配置，不写设备；收到有效 0x33 回复（HasCurrentPosition）即可用。
+    public bool IsCurrentPositionMemoryAvailable => HasCurrentPosition;
 
     [ObservableProperty]
     private int totalTravelSteps;
 
+    // 0x33 回复的负极限位置；目标位置合法范围为 [NegativeLimitSteps, TotalTravelSteps]。
     [ObservableProperty]
-    private double targetPercent;
+    private int negativeLimitSteps;
 
     [ObservableProperty]
     private int targetPositionSteps;
 
-    // 当前位置待绑定新电机的 LIN 状态信号。
+    // 当前位置由 0x33 回复绑定（字节 0-1），无符号 step。
     [ObservableProperty]
     private int currentPositionSteps;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsMotorCommandAvailable))]
-    [NotifyPropertyChangedFor(nameof(IsCurrentPositionMemoryAvailable))]
-    private bool hasInitializationSteps;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsCurrentPositionMemoryAvailable))]
     private bool hasCurrentPosition;
 
-    public double CurrentPositionPercent => TotalTravelSteps <= 0
-        ? 0d
-        : Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps) * 100d / TotalTravelSteps;
-
     public string CurrentPositionSummary =>
-        $"当前： {Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps)} step / {CurrentPositionPercent:0.0}%";
+        $"当前： {Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps)} step";
 
     [ObservableProperty]
     private bool isPresetConfigurationOpen;
@@ -118,6 +112,43 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     [ObservableProperty]
     private string currentTemperatureText = string.Empty;
+
+    // 设备状态显示：运动状态与电压/温度/堵转故障，由 0x33 回复驱动。
+    // 未收到有效帧时显示"—"（灰色）；正常为绿色，故障为红色。
+    private const string StatusNormalColor = "#107C10";
+    private const string StatusFaultColor = "#C42B1C";
+    private const string StatusIdleColor = "#5C5C5C";
+    private const string StatusMovingColor = "#0078D4";
+
+    [ObservableProperty]
+    private string motionStatusText = "—";
+
+    [ObservableProperty]
+    private string motionStatusColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string stallFaultText = "—";
+
+    [ObservableProperty]
+    private string stallFaultColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string undervoltageFaultText = "—";
+
+    [ObservableProperty]
+    private string undervoltageFaultColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string overvoltageFaultText = "—";
+
+    [ObservableProperty]
+    private string overvoltageFaultColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string overtemperatureFaultText = "—";
+
+    [ObservableProperty]
+    private string overtemperatureFaultColor = StatusIdleColor;
 
     [ObservableProperty]
     private string title = "执行器调试";
@@ -150,12 +181,17 @@ public partial class ActuatorDebugViewModel : ObservableObject
             OnPropertyChanged(nameof(IsMotorCommandAvailable));
             OnPropertyChanged(nameof(IsSerialCommandAvailable));
             OnPropertyChanged(nameof(IsCurrentPositionMemoryAvailable));
+            // 生成器不会为属性形式的 CanExecute 自动接线（只有 lambda 求值），
+            // 连接状态变化时显式刷新，避免按钮等 WPF 下一次 RequerySuggested 才解禁。
+            ConfirmTargetPositionCommand.NotifyCanExecuteChanged();
+            MoveToPresetCommand.NotifyCanExecuteChanged();
+            InitializeCalibrationCommand.NotifyCanExecuteChanged();
+            EmergencyStopCommand.NotifyCanExecuteChanged();
         }
     }
 
     private void ClearDeviceInfoValues()
     {
-        HasInitializationSteps = false;
         HasCurrentPosition = false;
         CurrentPositionSteps = 0;
         InitializationStepsText = string.Empty;
@@ -164,6 +200,102 @@ public partial class ActuatorDebugViewModel : ObservableObject
         HardwareVersionText = string.Empty;
         CurrentVoltageText = string.Empty;
         CurrentTemperatureText = string.Empty;
+        ClearMotorStatusDisplay();
+    }
+
+    /// <summary>
+    /// 应用一次 0x33 回复解析结果（须在 UI 线程调用）。
+    /// 状态值保持"最后一次有效读取的结果"：只有新回复到达才更新，本地不做超时清零。
+    /// </summary>
+    public void ApplyMotorStatus(MotorStatusSnapshot status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        CurrentPositionSteps = status.CurrentPositionSteps;
+        HasCurrentPosition = true;
+
+        // 正/负极限与目标位置绑定：滑块范围与 step 输入钳制使用 [负极限, 正极限]。
+        // 负极限大于正极限属于异常配置，以较大值作为上限避免钳制异常。
+        NegativeLimitSteps = status.NegativeLimitSteps;
+        TotalTravelSteps = Math.Max(status.PositiveLimitSteps, status.NegativeLimitSteps);
+
+        switch (status.MotionState)
+        {
+            case MotorMotionState.Stopped:
+            case MotorMotionState.Stalled:
+                // 堵转期间电机处于停止；堵转本身在"堵转故障"行单独显示。
+                MotionStatusText = "停止";
+                MotionStatusColor = StatusNormalColor;
+                break;
+            case MotorMotionState.Moving:
+                MotionStatusText = "运动中";
+                MotionStatusColor = StatusMovingColor;
+                break;
+            default:
+                MotionStatusText = "保留（0x3）";
+                MotionStatusColor = StatusIdleColor;
+                break;
+        }
+
+        if (status.MotionState == MotorMotionState.Stalled)
+        {
+            StallFaultText = "堵转";
+            StallFaultColor = StatusFaultColor;
+        }
+        else
+        {
+            StallFaultText = "正常";
+            StallFaultColor = StatusNormalColor;
+        }
+
+        if (status.VoltageState == MotorVoltageState.Low)
+        {
+            UndervoltageFaultText = "欠压";
+            UndervoltageFaultColor = StatusFaultColor;
+        }
+        else
+        {
+            UndervoltageFaultText = "正常";
+            UndervoltageFaultColor = StatusNormalColor;
+        }
+
+        if (status.VoltageState == MotorVoltageState.High)
+        {
+            OvervoltageFaultText = "过压";
+            OvervoltageFaultColor = StatusFaultColor;
+        }
+        else
+        {
+            OvervoltageFaultText = "正常";
+            OvervoltageFaultColor = StatusNormalColor;
+        }
+
+        if (status.Overtemperature)
+        {
+            OvertemperatureFaultText = "过温";
+            OvertemperatureFaultColor = StatusFaultColor;
+        }
+        else
+        {
+            OvertemperatureFaultText = "正常";
+            OvertemperatureFaultColor = StatusNormalColor;
+        }
+    }
+
+    private void ClearMotorStatusDisplay()
+    {
+        NegativeLimitSteps = 0;
+        TotalTravelSteps = DefaultTotalTravelSteps;
+        MotionStatusText = "—";
+        MotionStatusColor = StatusIdleColor;
+        StallFaultText = "—";
+        StallFaultColor = StatusIdleColor;
+        UndervoltageFaultText = "—";
+        UndervoltageFaultColor = StatusIdleColor;
+        OvervoltageFaultText = "—";
+        OvervoltageFaultColor = StatusIdleColor;
+        OvertemperatureFaultText = "—";
+        OvertemperatureFaultColor = StatusIdleColor;
     }
 
     private void ShowDeviceInfoReadNotification(string text)
@@ -290,76 +422,79 @@ public partial class ActuatorDebugViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(IsMotorCommandAvailable))]
     private void ConfirmTargetPosition()
     {
-        ShowDeviceInfoReadNotification(ProtocolStatusText);
+        var position = (ushort)Math.Clamp(TargetPositionSteps, 0, ushort.MaxValue);
+        motorCommands.SetMoveToPosition(position);
+        ShowDeviceInfoReadNotification($"已下发目标位置：{position} step");
     }
 
     [RelayCommand(CanExecute = nameof(IsMotorCommandAvailable))]
     private void MoveToPreset(string? presetId)
     {
-        ShowDeviceInfoReadNotification(ProtocolStatusText);
+        if (string.IsNullOrWhiteSpace(presetId))
+        {
+            return;
+        }
+
+        int position;
+        if (string.Equals(presetId, "close", StringComparison.Ordinal))
+        {
+            // CLOSE：运动到负极限位置。
+            position = NegativeLimitSteps;
+        }
+        else
+        {
+            var preset = Presets.FirstOrDefault(item =>
+                string.Equals(item.Id, presetId, StringComparison.Ordinal));
+            if (preset is null)
+            {
+                return;
+            }
+
+            position = preset.PositionSteps;
+        }
+
+        var target = (ushort)Math.Clamp(position, 0, ushort.MaxValue);
+        motorCommands.SetMoveToPosition(target);
+        ShowDeviceInfoReadNotification($"已下发目标位置：{target} step");
     }
 
     [RelayCommand(CanExecute = nameof(IsSerialCommandAvailable))]
     private void InitializeCalibration()
     {
-        ShowDeviceInfoReadNotification(ProtocolStatusText);
+        motorCommands.SetInitialize();
+        ShowDeviceInfoReadNotification("已下发初始化指令");
     }
 
     [RelayCommand(CanExecute = nameof(IsSerialCommandAvailable))]
     private void EmergencyStop()
     {
-        ShowDeviceInfoReadNotification(ProtocolStatusText);
-    }
-
-    partial void OnTargetPercentChanged(double value)
-    {
-        if (synchronizingTargetPosition)
-        {
-            return;
-        }
-
-        var normalizedValue = double.IsFinite(value) ? Math.Clamp(value, 0d, 100d) : 0d;
-        synchronizingTargetPosition = true;
-        try
-        {
-            TargetPercent = normalizedValue;
-            TargetPositionSteps = (int)Math.Round(TotalTravelSteps * normalizedValue / 100d);
-        }
-        finally
-        {
-            synchronizingTargetPosition = false;
-        }
+        motorCommands.SetStop();
+        ShowDeviceInfoReadNotification("已下发停止指令");
     }
 
     partial void OnCurrentPositionStepsChanged(int value)
     {
-        OnPropertyChanged(nameof(CurrentPositionPercent));
         OnPropertyChanged(nameof(CurrentPositionSummary));
     }
 
     partial void OnTotalTravelStepsChanged(int value)
     {
-        OnPropertyChanged(nameof(CurrentPositionPercent));
         OnPropertyChanged(nameof(CurrentPositionSummary));
+        // 正极限变化后，目标位置可能超出新的合法范围，触发一次钳制。
+        TargetPositionSteps = Math.Clamp(TargetPositionSteps, NegativeLimitSteps, value);
+    }
+
+    partial void OnNegativeLimitStepsChanged(int value)
+    {
+        TargetPositionSteps = Math.Clamp(TargetPositionSteps, value, TotalTravelSteps);
     }
 
     partial void OnTargetPositionStepsChanged(int value)
     {
-        if (synchronizingTargetPosition)
-        {
-            return;
-        }
-
-        var normalizedValue = Math.Clamp(value, 0, TotalTravelSteps);
-        synchronizingTargetPosition = true;
-        try
+        var normalizedValue = Math.Clamp(value, NegativeLimitSteps, TotalTravelSteps);
+        if (normalizedValue != value)
         {
             TargetPositionSteps = normalizedValue;
-            TargetPercent = Math.Round(normalizedValue * 100d / TotalTravelSteps, 1);
-        }
-        finally
-        {
-            synchronizingTargetPosition = false;
         }
     }
 

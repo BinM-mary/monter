@@ -146,7 +146,6 @@
                                                 <ColumnDefinition Width="92" />
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="32" />
-                                                <ColumnDefinition Width="58" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center" />
                                             <TextBox Grid.Column="1"
@@ -154,12 +153,6 @@
                                                      VerticalContentAlignment="Center"
                                                      mah:ControlsHelper.CornerRadius="6" />
                                             <TextBlock Grid.Column="2" Text="step" Margin="6,0,0,0" VerticalAlignment="Center" Foreground="#6B6B6B" FontSize="12" />
-                                            <TextBlock Grid.Column="3"
-                                                       Text="{Binding Percentage, StringFormat={}{0:0.0}%}"
-                                                       HorizontalAlignment="Right"
-                                                       VerticalAlignment="Center"
-                                                       Foreground="#6B6B6B"
-                                                       FontSize="12" />
                                         </Grid>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>

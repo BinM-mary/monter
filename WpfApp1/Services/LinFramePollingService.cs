@@ -4,14 +4,16 @@ using WpfApp1.Models;
 namespace WpfApp1.Services;
 
 /// <summary>
-/// 串口连接成功后按固定周期发送读取请求（现为每 100 ms 一条），
-/// 不等待回复；回复由 LinFrameChannel 统一解析并经 FrameReceived 分发。
+/// 串口连接成功后按固定周期发送（现为每 100 ms 一拍）：先发 0x15 写入应用帧
+/// （数据取自 MotorCommandService 当前快照），再轮流发送从节点帧的读取请求，
+/// 均不等待回复；回复由 LinFrameChannel 统一解析并经 FrameReceived 分发。
 /// 周期到点时若上一次发送尚未完成则跳过本拍，不排队堆积。
 /// 多个从节点应用帧时按登记顺序轮流发送。
 /// </summary>
 public sealed class LinFramePollingService : IDisposable
 {
     private readonly LinFrameChannel channel;
+    private readonly MotorCommandService? motorCommands;
     private readonly TimeSpan period;
     private readonly object stateLock = new();
     private readonly Timer pollTimer;
@@ -21,9 +23,13 @@ public sealed class LinFramePollingService : IDisposable
     private bool disposed;
     private int sendInProgress;
 
-    public LinFramePollingService(LinFrameChannel channel, TimeSpan? period = null)
+    public LinFramePollingService(
+        LinFrameChannel channel,
+        MotorCommandService? motorCommands = null,
+        TimeSpan? period = null)
     {
         this.channel = channel ?? throw new ArgumentNullException(nameof(channel));
+        this.motorCommands = motorCommands;
         this.period = period ?? TimeSpan.FromMilliseconds(100);
         if (this.period <= TimeSpan.Zero)
         {
@@ -118,11 +124,19 @@ public sealed class LinFramePollingService : IDisposable
         _ = SendAsync(id);
     }
 
-    private async Task SendAsync(byte id)
+    private async Task SendAsync(byte readId)
     {
         try
         {
-            await channel.SendReadRequestAsync(id).ConfigureAwait(false);
+            // 每拍先写后读：写入帧数据为 MotorCommandService 当前快照。
+            if (motorCommands is not null)
+            {
+                await channel.SendWriteRequestAsync(
+                    MotorCommandService.FrameId,
+                    motorCommands.CreateDataSnapshot()).ConfigureAwait(false);
+            }
+
+            await channel.SendReadRequestAsync(readId).ConfigureAwait(false);
         }
         catch (Exception exception)
         {

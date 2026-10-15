@@ -9,8 +9,9 @@ public enum CommunicationLogDirection
 }
 
 /// <summary>
-/// 报文记录。区分三种 LIN 串口形态：读取请求（55 AA 55 PID 00）、
-/// 读取回复（DATA + Checksum，PID/ID 为反算恢复值，须标注）、
+/// 报文记录。区分四种 LIN 串口形态：读取请求（55 AA 55 PID 00）、
+/// 读取回复（DATA + Checksum，PID/ID 为反算恢复值，显示时不加标注）、
+/// 写入帧（55 AA 55 PID 08 DATA CS，Checksum 以原始 ID 为种子累加 08+DATA）、
 /// 主节点发布完整帧（55 AA 55 PID DATA CS）；无法识别的按错误条目显示原始字节。
 /// </summary>
 public sealed class CommunicationLogEntry
@@ -69,7 +70,32 @@ public sealed class CommunicationLogEntry
             return;
         }
 
-        // 接收的读取回复：只有 DATA + Checksum。PID 与 ID 是反算恢复值，须标注，不是报文中的独立字段。
+        // 发送的写入帧：55 AA 55 PID 08 DATA CS。08 是写入标识；
+        // Checksum 为标准增强型：以 PID（由原始 ID 计算）为种子，只累加 DATA（不含 08）。
+        if (direction == CommunicationLogDirection.Sent
+            && hasHeader
+            && bytes.Length >= LinFrameCodec.HeaderLength + 2
+            && bytes[4] == LinFrameCodec.WriteRequestFlag)
+        {
+            BreakText = FormatBytes(bytes.AsSpan(0, 2));
+            SyncText = FormatByte(bytes[2]);
+            ProtectedIdText = FormatByte(bytes[3]);
+            FrameIdText = FormatByte((byte)(bytes[3] & 0x3F));
+            FrameTypeText = "写入帧";
+            var dataLength = bytes.Length - LinFrameCodec.HeaderLength - 2;
+            DataLengthText = $"{dataLength} bytes";
+            PayloadText = FormatBytes(bytes.AsSpan(LinFrameCodec.HeaderLength + 1, dataLength));
+            ChecksumText = FormatByte(bytes[^1]);
+            ChecksumTypeText = "增强";
+            ChecksumStatusText = LinFrameCodec.CalculateWriteChecksum(
+                (byte)(bytes[3] & 0x3F),
+                bytes.AsSpan(LinFrameCodec.HeaderLength + 1, dataLength)) == bytes[^1]
+                ? "通过"
+                : "校验失败";
+            return;
+        }
+
+        // 接收的读取回复：只有 DATA + Checksum。PID 与 ID 是反算恢复值。
         if (!hasHeader && definition is not null && bytes.Length >= 2)
         {
             if (LinFrameCodec.TryRecoverProtectedId(bytes, out var protectedId)
@@ -79,8 +105,8 @@ public sealed class CommunicationLogEntry
                     definition.ChecksumType) == bytes[^1])
             {
                 FrameTypeText = "回复帧";
-                ProtectedIdText = FormatByte(protectedId) + "（恢复）";
-                FrameIdText = FormatByte((byte)(protectedId & 0x3F)) + "（恢复）";
+                ProtectedIdText = FormatByte(protectedId);
+                FrameIdText = FormatByte((byte)(protectedId & 0x3F));
                 DataLengthText = $"{bytes.Length - 1} bytes";
                 PayloadText = FormatBytes(bytes.AsSpan(0, bytes.Length - 1));
                 ChecksumText = FormatByte(bytes[^1]);

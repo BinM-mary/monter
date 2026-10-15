@@ -19,6 +19,9 @@ public partial class ProtocolLogWindow : MetroWindow
     private bool autoScrolling;
     private bool scrollToLatestPending;
     private bool closeRequestedByApplication;
+    // 记录用户拖动后的横向偏移；自动滚动到底时保持它，否则每批新行都会把
+    // 横向滚动条重置回最左侧（ScrollToEnd/虚拟化测量会重置 HorizontalOffset）。
+    private double userHorizontalOffset;
 
     public ProtocolLogWindow(ICommunicationLogService communicationLog)
     {
@@ -118,6 +121,12 @@ public partial class ProtocolLogWindow : MetroWindow
             return;
         }
 
+        // 用户横向拖动时记住位置；后续自动滚动到底时恢复它。
+        if (e.HorizontalChange != 0)
+        {
+            userHorizontalOffset = logScrollViewer.HorizontalOffset;
+        }
+
         // ExtentHeightChange only indicates that a new row was laid out; it
         // should not cancel following when the user was already at the bottom.
         if (e.VerticalChange == 0 && e.ViewportHeightChange == 0)
@@ -151,6 +160,9 @@ public partial class ProtocolLogWindow : MetroWindow
                 try
                 {
                     logScrollViewer?.ScrollToEnd();
+                    // ScrollToEnd 会同时把横向偏移推到最右，且虚拟化测量期间
+                    // 横向偏移也可能被清零；统一恢复到用户选定的横向位置。
+                    logScrollViewer?.ScrollToHorizontalOffset(userHorizontalOffset);
                 }
                 finally
                 {

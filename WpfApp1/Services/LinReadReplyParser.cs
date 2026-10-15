@@ -4,11 +4,12 @@ using WpfApp1.Models;
 namespace WpfApp1.Services;
 
 /// <summary>
-/// 组装"DATA + Checksum"格式的读取回复。回复没有 Break、Sync、PID 或长度字段，
-/// 以已登记从节点应用帧的 DataLength + 1 作为候选长度；反算出候选 PID 后，
-/// 必须通过 P0/P1 奇偶自洽、帧表匹配（且为从节点应用帧）并用候选 PID 复算
-/// Checksum 一致才接受。反算后代回复算必然成立，不构成独立验证步骤；
-/// 候选长度全部失败且缓存已超过最长候选时，逐字节丢弃重同步。
+/// 组装"DATA + Checksum"格式的应用帧回复（读取与写入请求均会有回复）。
+/// 回复没有 Break、Sync、PID 或长度字段，以已登记应用帧的 DataLength + 1
+/// 作为候选长度；反算出候选 PID 并通过 P0/P1 奇偶自洽、帧表匹配后即视为
+/// 解析出 ID，交由订阅方处理——有无对应业务回调由订阅方自行决定，
+/// 无人认领的帧仅记录报文日志。候选长度全部失败且缓存已超过最长候选时，
+/// 逐字节丢弃重同步。
 /// </summary>
 public sealed class LinReadReplyParser
 {
@@ -21,7 +22,7 @@ public sealed class LinReadReplyParser
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         candidateLengths = catalog.Definitions
-            .Where(definition => !definition.IsDiagnostic && definition.Publisher == LinPublisher.Slave)
+            .Where(definition => !definition.IsDiagnostic)
             .Select(definition => definition.DataLength + 1)
             .Distinct()
             .OrderBy(length => length)
@@ -149,9 +150,9 @@ public sealed class LinReadReplyParser
         }
 
         var id = (byte)(protectedId & 0x3F);
-        if (!catalog.TryGet(id, out var definition)
-            || definition!.IsDiagnostic
-            || definition.Publisher != LinPublisher.Slave)
+        // 查帧表即"查找相关 ID"：已登记即接受（读取与写入帧均可能有回复），
+        // 是否有业务回调由订阅方决定，无人认领仅记日志。
+        if (!catalog.TryGet(id, out var definition) || definition!.IsDiagnostic)
         {
             return false;
         }

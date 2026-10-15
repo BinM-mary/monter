@@ -30,6 +30,15 @@
                         MinHeight="0"
                         FontSize="12"
                         mah:ControlsHelper.CornerRadius="5" />
+            <Button DockPanel.Dock="Right"
+                        Content="{Binding PauseButtonText}"
+                        Command="{Binding TogglePauseCommand}"
+                        Padding="8,2"
+                        MinWidth="0"
+                        MinHeight="0"
+                        FontSize="12"
+                        Margin="0,0,8,0"
+                        mah:ControlsHelper.CornerRadius="5" />
             <TextBlock Text="收发报文详情"
                         FontSize="14"
                         FontWeight="SemiBold"
@@ -96,6 +105,16 @@
                   ScrollViewer.CanContentScroll="True"
                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                   ScrollViewer.VerticalScrollBarVisibility="Auto">
+            <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                    <!-- RX 行浅灰底色，与 TX 行区分；选中高亮仍由默认模板覆盖 -->
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding DirectionText}" Value="RX">
+                            <Setter Property="Background" Value="#F0F0F0" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </ListView.ItemContainerStyle>
             <ListView.View>
                 <GridView>
                     <GridViewColumn Header="时间"
