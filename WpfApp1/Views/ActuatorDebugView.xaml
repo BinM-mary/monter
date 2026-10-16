@@ -55,7 +55,7 @@
                             <Grid><Grid.RowDefinitions><RowDefinition Height="38" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                                 <Border BorderBrush="#E7E7E7" BorderThickness="0,0,0,1"><StackPanel Orientation="Horizontal"><Border Width="3" Background="#0078D4" /><TextBlock Text="读取设备信息" Style="{StaticResource CardTitleStyle}" /></StackPanel></Border>
                                 <UniformGrid Grid.Row="1" Columns="2" Rows="2" Margin="14">
-                                    <Button Content="读取初始化步数" Command="{Binding ReadDeviceInfoCommand}" CommandParameter="读取初始化步数" Style="{StaticResource ActionButtonStyle}" Margin="0,0,8,8" /><Button Content="读取固件版本" Command="{Binding ReadDeviceInfoCommand}" CommandParameter="读取固件版本" Style="{StaticResource ActionButtonStyle}" Margin="0,0,0,8" />
+                                    <Button Content="读取Bootloader版本" Command="{Binding ReadDeviceInfoCommand}" CommandParameter="读取Bootloader版本" Style="{StaticResource ActionButtonStyle}" Margin="0,0,8,8" /><Button Content="读取固件版本" Command="{Binding ReadDeviceInfoCommand}" CommandParameter="读取固件版本" Style="{StaticResource ActionButtonStyle}" Margin="0,0,0,8" />
                                     <Button Content="读取硬件版本" Command="{Binding ReadDeviceInfoCommand}" CommandParameter="读取硬件版本" Style="{StaticResource ActionButtonStyle}" Margin="0,0,8,0" /><Button Content="读取电压和温度参数" Command="{Binding ReadDeviceInfoCommand}" CommandParameter="读取电压和温度参数" Style="{StaticResource ActionButtonStyle}" />
                                 </UniformGrid>
                             </Grid>
