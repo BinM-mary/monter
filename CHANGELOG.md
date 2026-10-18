@@ -1,6 +1,25 @@
 # 修改记录
 
+> 2026-10-18 诊断第一阶段：按 `WpfApp1诊断架构讨论记录.md` 实现三个设备版本读取（22 F1 80 / F1 95 / F1 93，NAD 0x78），调度采用“暂停应用通信”模式；详见本文 2026-10-18 条目。
+>
 > 2026-10-15 文档整理：协议文档合并为 [PROTOCOL.md](PROTOCOL.md)（原 `LIN_APPLICATION_READ.md`、`LIN_APPLICATION_WRITE.md` 已并入）；早期 `AA 55 / CMD / SUB_CMD / LEN / XOR` 旧协议时期的详细记录已压缩为摘要，Git 历史可查完整内容。
+
+## 2026-10-18
+
+### 诊断模块第一阶段实现：三个设备版本读取
+
+架构与执行规则以 `WpfApp1诊断架构讨论记录.md` 的定稿为准（模块职责、接收识别、TP 状态机、调度与时间规则、业务成功条件、应用恢复节奏）。
+
+- 新增 `Models/Diagnostics.cs`：`DeviceVersionKind`、`DiagnosticRequest`、`DiagnosticResult`、`TpReceiveResult`、`FrameWriteReceipt`、`DiagnosticPacket`、`DiagnosticTiming`。
+- 新增 `Services/LinTransportProtocol.cs`：SF 编码与 SF/FF/CF 重组；NAD、PCI、长度、序号（4 位回绕）、N_Cr 检查；放弃原因与“放弃后不重启、收齐只交付一次”。
+- 新增 `Services/LinBusScheduler.cs`：由 `LinFramePollingService` 演进为统一发送调度器（原文件已删除）。100 ms 应用拍保持先 0x15 后 0x33；按单帧边界暂停并保存游标；3D 按 t0 + n×20 ms 节拍发送、忙则跳拍不补发；队列清空后从游标立即恢复并衔接整拍。
+- 新增 `Services/DiagnosticTransactionService.cs`：全局 FIFO 串行执行、3C 回显逐字节核对、t0 与 t0+5 s 截止、TP 放弃原因保存、断线清空队列、统一收尾（停止新 3D → 清理 → 等待在途写入）。
+- 新增 `Services/DeviceInformationService.cs`：三个版本 DID 映射、正响应前缀校验、ASCII 解释（长度由 FF 声明动态确定）。
+- `LinFrameCodec` 增加 3C 请求构帧与经典校验（不以 PID 为种子）；`LinReadReplyParser` 增加诊断候选识别（增强解析失败后按经典校验回退，9 字节同为应用/诊断候选长度时不会互相误判）；`LinFrameChannel` 增加 3C/3D 发送（返回写入回执）与诊断候选事件；`CommunicationLogEntry` 增加“诊断请求/诊断数据”显示分支（诊断回包不显示反算 PID/ID）。
+- 帧表登记 `0x3C`（主发、8 字节、经典）与 `0x3D`（从发、8 字节、经典）。
+- 界面：三个版本读取按钮启用（电压/温度参数仍禁用），诊断进行中禁用电机操作并保留 0x33 显示；“初始化步数”行改为“Bootloader版本”。
+- 删除未接线的 `ApplicationFrameService`，避免遗留可绕过诊断独占的应用发送路径。
+- 验证：隔离输出构建通过，0 个警告、0 个错误；31 项隔离检查通过（三个请求字节 55 AA 55 3C 08 … DA/EF/DC、3D 读取 55 AA 55 7D 00、固件样例 7 段重组与 ASCII、回显逐字节核对、TP 异常输入、应用/诊断候选互不误判、报文窗口显示）；尚未实机联调。
 
 ## 2026-10-15
 

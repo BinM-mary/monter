@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WpfApp1.Models;
@@ -27,15 +28,23 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     private readonly MotorPresetStorageService motorPresetStorage = new();
     private readonly MotorCommandService motorCommands;
+    private readonly DeviceInformationService deviceInfo;
+    private readonly DiagnosticTransactionService diagnostics;
     private CancellationTokenSource? deviceInfoReadNotificationCancellation;
+    private bool isDiagnosticActive;
 
     public ActuatorDebugViewModel(
         SerialSettingsViewModel serialSettings,
-        MotorCommandService motorCommands)
+        MotorCommandService motorCommands,
+        DeviceInformationService deviceInfo,
+        DiagnosticTransactionService diagnostics)
     {
         SerialSettings = serialSettings;
         this.motorCommands = motorCommands ?? throw new ArgumentNullException(nameof(motorCommands));
+        this.deviceInfo = deviceInfo ?? throw new ArgumentNullException(nameof(deviceInfo));
+        this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         SerialSettings.PropertyChanged += SerialSettings_PropertyChanged;
+        diagnostics.DiagnosticActivityChanged += Diagnostics_DiagnosticActivityChanged;
         TotalTravelSteps = DefaultTotalTravelSteps;
         ClearDeviceInfoValues();
         Presets = new ObservableCollection<MotorPresetViewModel>(CreatePresetViewModels(
@@ -49,15 +58,18 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     public ObservableCollection<MotorPresetViewModel> EditablePresets { get; }
 
-    // 0x33 状态显示与 0x15 控制写入均已接入；"读取设备信息"的设备信息读取协议仍未定义，保持禁用。
-    public bool IsDeviceProtocolAvailable => false;
+    // 0x33 状态显示与 0x15 控制写入均已接入。三个设备版本读取（0x22 F1 80/F1 95/F1 93）已实现；
+    // "读取电压和温度参数"协议仍未定义，保持禁用。
+    public string ProtocolStatusText =>
+        "0x33 状态显示 + 0x15 控制写入已接入；三个设备版本读取已实现，电压温度参数待定义";
 
-    public string ProtocolStatusText => "0x33 状态显示 + 0x15 控制写入已接入；设备信息读取待定义";
+    // 诊断进行中（含排队等待期间）禁用电机操作；暂停期间 0x33 不再刷新，显示保持最后一次有效值。
+    private bool IsDiagnosticIdle => !isDiagnosticActive;
 
-    // 0x15 写入帧由轮询服务每 100 ms 发送，串口连接后即可下发控制指令。
-    public bool IsMotorCommandAvailable => SerialSettings.IsConnected;
+    // 0x15 写入帧由调度器每 100 ms 发送，串口连接且无诊断在跑时才可下发控制指令。
+    public bool IsMotorCommandAvailable => SerialSettings.IsConnected && IsDiagnosticIdle;
 
-    public bool IsSerialCommandAvailable => SerialSettings.IsConnected;
+    public bool IsSerialCommandAvailable => SerialSettings.IsConnected && IsDiagnosticIdle;
 
     // "记忆当前位置"只保存到本机配置，不写设备；收到有效 0x33 回复（HasCurrentPosition）即可用。
     public bool IsCurrentPositionMemoryAvailable => HasCurrentPosition;
@@ -97,6 +109,9 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     [ObservableProperty]
     private string initializationStepsText = string.Empty;
+
+    [ObservableProperty]
+    private string bootloaderVersionText = string.Empty;
 
     [ObservableProperty]
     private string retreatAngleText = string.Empty;
@@ -165,10 +180,91 @@ public partial class ActuatorDebugViewModel : ObservableObject
         StatusText = $"你好，{UserName}";
     }
 
-    [RelayCommand(CanExecute = nameof(IsDeviceProtocolAvailable))]
-    private void ReadDeviceInfo(string operationName)
+    // 三个版本读取：串口已连接即可入队（诊断排队期间仍可继续提交）；
+    // 电压/温度参数协议未定义，保持禁用。读取结果为版本文本或界面提示，失败不清空已有显示。
+    private bool CanReadDeviceInfo(string? operationName)
     {
-        ShowDeviceInfoReadNotification(ProtocolStatusText);
+        return SerialSettings.IsConnected && TryMapVersionKind(operationName, out _);
+    }
+
+    [RelayCommand(CanExecute = nameof(CanReadDeviceInfo))]
+    private async Task ReadDeviceInfoAsync(string? operationName)
+    {
+        if (!TryMapVersionKind(operationName, out var kind))
+        {
+            return;
+        }
+
+        var displayName = operationName ?? "设备信息";
+        var result = await deviceInfo.ReadVersionAsync(kind).ConfigureAwait(false);
+        if (result.Success)
+        {
+            SetVersionText(kind, result.VersionText ?? string.Empty);
+            ShowDeviceInfoReadNotification($"{displayName}读取成功", NotificationLongDuration);
+            return;
+        }
+
+        // 失败不清空已有版本显示（状态保持最后一次有效读取的结果）。
+        ShowDeviceInfoReadNotification($"{displayName}读取失败：{result.FailureText}", NotificationLongDuration);
+    }
+
+    private void SetVersionText(DeviceVersionKind kind, string versionText)
+    {
+        switch (kind)
+        {
+            case DeviceVersionKind.Bootloader:
+                BootloaderVersionText = versionText;
+                break;
+            case DeviceVersionKind.Firmware:
+                FirmwareVersionText = versionText;
+                break;
+            case DeviceVersionKind.Hardware:
+                HardwareVersionText = versionText;
+                break;
+        }
+    }
+
+    private static bool TryMapVersionKind(string? operationName, out DeviceVersionKind kind)
+    {
+        switch (operationName)
+        {
+            case "读取Bootloader版本":
+                kind = DeviceVersionKind.Bootloader;
+                return true;
+            case "读取固件版本":
+                kind = DeviceVersionKind.Firmware;
+                return true;
+            case "读取硬件版本":
+                kind = DeviceVersionKind.Hardware;
+                return true;
+            default:
+                kind = default;
+                return false;
+        }
+    }
+
+    private void Diagnostics_DiagnosticActivityChanged(bool diagnosticActive)
+    {
+        // 协调层在后台线程上报，界面状态切回 UI 线程更新。
+        _ = Application.Current?.Dispatcher.BeginInvoke(() => ApplyDiagnosticActivity(diagnosticActive));
+    }
+
+    private void ApplyDiagnosticActivity(bool diagnosticActive)
+    {
+        isDiagnosticActive = diagnosticActive;
+        OnPropertyChanged(nameof(IsMotorCommandAvailable));
+        OnPropertyChanged(nameof(IsSerialCommandAvailable));
+        ConfirmTargetPositionCommand.NotifyCanExecuteChanged();
+        MoveToPresetCommand.NotifyCanExecuteChanged();
+        InitializeCalibrationCommand.NotifyCanExecuteChanged();
+        EmergencyStopCommand.NotifyCanExecuteChanged();
+    }
+
+    public void Dispose()
+    {
+        diagnostics.DiagnosticActivityChanged -= Diagnostics_DiagnosticActivityChanged;
+        SerialSettings.PropertyChanged -= SerialSettings_PropertyChanged;
+        deviceInfoReadNotificationCancellation?.Cancel();
     }
 
     private void SerialSettings_PropertyChanged(
@@ -187,6 +283,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
             MoveToPresetCommand.NotifyCanExecuteChanged();
             InitializeCalibrationCommand.NotifyCanExecuteChanged();
             EmergencyStopCommand.NotifyCanExecuteChanged();
+            ReadDeviceInfoCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -195,6 +292,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
         HasCurrentPosition = false;
         CurrentPositionSteps = 0;
         InitializationStepsText = string.Empty;
+        BootloaderVersionText = string.Empty;
         RetreatAngleText = string.Empty;
         FirmwareVersionText = string.Empty;
         HardwareVersionText = string.Empty;
@@ -298,21 +396,29 @@ public partial class ActuatorDebugViewModel : ObservableObject
         OvertemperatureFaultColor = StatusIdleColor;
     }
 
+    private static readonly TimeSpan NotificationShortDuration = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan NotificationLongDuration = TimeSpan.FromSeconds(3);
+
     private void ShowDeviceInfoReadNotification(string text)
+    {
+        ShowDeviceInfoReadNotification(text, NotificationShortDuration);
+    }
+
+    private void ShowDeviceInfoReadNotification(string text, TimeSpan duration)
     {
         deviceInfoReadNotificationCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         deviceInfoReadNotificationCancellation = cancellation;
         DeviceInfoReadNotificationText = text;
         IsDeviceInfoReadNotificationVisible = true;
-        _ = HideDeviceInfoReadNotificationAsync(cancellation);
+        _ = HideDeviceInfoReadNotificationAsync(cancellation, duration);
     }
 
-    private async Task HideDeviceInfoReadNotificationAsync(CancellationTokenSource cancellation)
+    private async Task HideDeviceInfoReadNotificationAsync(CancellationTokenSource cancellation, TimeSpan duration)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellation.Token);
+            await Task.Delay(duration, cancellation.Token);
         }
         catch (OperationCanceledException)
         {

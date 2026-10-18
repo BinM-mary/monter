@@ -12,6 +12,10 @@ public static class LinFrameCodec
     public const int ReadRequestLength = HeaderLength + 1;
     public const byte ReadRequestFlag = 0x00;
     public const byte WriteRequestFlag = 0x08;
+    public const byte DiagnosticRequestId = 0x3C;
+    public const byte DiagnosticResponseId = 0x3D;
+    public const int DiagnosticPduLength = 8;
+    public const int DiagnosticWireLength = DiagnosticPduLength + 1;
 
     public static byte CalculateProtectedId(byte id)
     {
@@ -115,6 +119,45 @@ public static class LinFrameCodec
         var candidate = ((foldedSum - dataSum) % 255 + 255) % 255;
         protectedId = (byte)candidate;
         return true;
+    }
+
+    /// <summary>
+    /// 构造 3C 诊断请求（55 AA 55 3C 08 + 8 字节 PDU + CS，共 14 字节）。
+    /// 08 为串口接口写入标识，不参与校验；Checksum 为经典校验——只累加 8 字节 PDU，
+    /// 不以 PID 为种子，与增强型应用帧校验不同（WpfApp1诊断架构讨论记录.md §7.1）。
+    /// </summary>
+    public static byte[] CreateDiagnosticRequest(ReadOnlySpan<byte> pdu)
+    {
+        if (pdu.Length != DiagnosticPduLength)
+        {
+            throw new ArgumentException($"诊断请求 PDU 必须为 {DiagnosticPduLength} 字节。", nameof(pdu));
+        }
+
+        var raw = new byte[HeaderLength + 1 + pdu.Length + 1];
+        CreateHeaderBytes(DiagnosticRequestId).CopyTo(raw, 0);
+        raw[HeaderLength] = WriteRequestFlag;
+        pdu.CopyTo(raw.AsSpan(HeaderLength + 1));
+        raw[^1] = CalculateClassicChecksum(pdu);
+        return raw;
+    }
+
+    /// <summary>
+    /// 经典校验：只累加 DATA/PDU（种子 0），进位折叠后取反；诊断帧 3C/3D 使用。
+    /// 与样例核对：78 03 22 F1 95 FF FF FF → DA；22 F1 80 → EF；22 F1 93 → DC。
+    /// </summary>
+    public static byte CalculateClassicChecksum(ReadOnlySpan<byte> data)
+    {
+        var sum = 0;
+        foreach (var value in data)
+        {
+            sum += value;
+            if (sum > 0xFF)
+            {
+                sum -= 0xFF;
+            }
+        }
+
+        return (byte)(~sum & 0xFF);
     }
 
     public static byte[] CreateFrame(LinFrameDefinition definition, ReadOnlySpan<byte> data)

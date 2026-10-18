@@ -21,18 +21,25 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // 信号布局见 PROTOCOL.md §4.3；回复经 FrameReceived 绑定到执行器调试界面。
         // 0x15：写入应用帧，主节点发布，线上格式 55 AA 55 PID 08 + 8 字节 DATA + Checksum
         // （Checksum 以 PID 为种子累加 DATA，不含 08）；数据布局见 PROTOCOL.md §5.2。
+        // 0x3C/0x3D：诊断帧，固定 8 字节且使用经典校验，方向与约束见 LinFrameDefinition；
+        // 诊断收发格式、3C 回显核对与调度规则见 WpfApp1诊断架构讨论记录.md §7、§11。
         FrameCatalog = new LinFrameCatalog(
         [
             new LinFrameDefinition(0x33, 8, LinPublisher.Slave, LinChecksumType.Enhanced),
-            new LinFrameDefinition(0x15, 8, LinPublisher.Master, LinChecksumType.Enhanced)
+            new LinFrameDefinition(0x15, 8, LinPublisher.Master, LinChecksumType.Enhanced),
+            new LinFrameDefinition(0x3C, 8, LinPublisher.Master, LinChecksumType.Classic),
+            new LinFrameDefinition(0x3D, 8, LinPublisher.Slave, LinChecksumType.Classic)
         ]);
         FrameChannel = new LinFrameChannel(connectionService, CommunicationLog, FrameCatalog);
-        ApplicationFrames = new ApplicationFrameService(FrameChannel);
-        // 0x15 写入帧的当前数据状态：界面操作修改字段，轮询每拍按快照组帧。
+        // 0x15 写入帧的当前数据状态：界面操作修改字段，调度每拍按快照组帧。
         MotorCommands = new MotorCommandService();
-        // 串口连接成功后每 100 ms 一拍：先发 0x15 写入帧（当前快照），再发 0x33 读取请求，均不等待回复。
-        FramePolling = new LinFramePollingService(FrameChannel, MotorCommands);
-        ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, MotorCommands);
+        // 统一发送调度器：应用通信 100 ms 一拍（先写 0x15 再读 0x33），
+        // 诊断期间按单帧边界暂停应用发送，诊断队列清空后从保存游标恢复。
+        BusScheduler = new LinBusScheduler(FrameChannel, MotorCommands);
+        // 诊断事务协调层：同一总线串行执行，3C 回显核对、超时与统一收尾。
+        Diagnostics = new DiagnosticTransactionService(FrameChannel, BusScheduler);
+        DeviceInfo = new DeviceInformationService(Diagnostics);
+        ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, MotorCommands, DeviceInfo, Diagnostics);
         FrameChannel.FrameReceived += HandleStatusFrameReceived;
 
         MenuItems = new ObservableCollection<MenuItemViewModel>
@@ -53,9 +60,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public LinFrameChannel FrameChannel { get; }
 
-    public ApplicationFrameService ApplicationFrames { get; }
+    public LinBusScheduler BusScheduler { get; }
 
-    public LinFramePollingService FramePolling { get; }
+    public DiagnosticTransactionService Diagnostics { get; }
+
+    public DeviceInformationService DeviceInfo { get; }
 
     public MotorCommandService MotorCommands { get; }
 
@@ -64,8 +73,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         FrameChannel.FrameReceived -= HandleStatusFrameReceived;
-        FramePolling.Dispose();
-        ApplicationFrames.Dispose();
+        ActuatorDebug.Dispose();
+        Diagnostics.Dispose();
+        BusScheduler.Dispose();
         FrameChannel.Dispose();
         SerialSettings.Dispose();
         connectionService.Dispose();

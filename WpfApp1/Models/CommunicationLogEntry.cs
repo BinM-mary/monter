@@ -84,12 +84,42 @@ public sealed class CommunicationLogEntry
             FrameTypeText = "写入帧";
             var dataLength = bytes.Length - LinFrameCodec.HeaderLength - 2;
             DataLengthText = $"{dataLength} bytes";
-            PayloadText = FormatBytes(bytes.AsSpan(LinFrameCodec.HeaderLength + 1, dataLength));
+            var payload = bytes.AsSpan(LinFrameCodec.HeaderLength + 1, dataLength);
+            PayloadText = FormatBytes(payload);
+
+            // 诊断请求（3C）：Checksum 为经典校验，只累加 PDU，不以 PID 为种子（§7.1）。
+            if (definition is { IsDiagnostic: true })
+            {
+                FrameTypeText = "诊断请求";
+                ChecksumTypeText = "经典";
+                ChecksumText = FormatByte(bytes[^1]);
+                ChecksumStatusText = LinFrameCodec.CalculateClassicChecksum(payload) == bytes[^1]
+                    ? "通过"
+                    : "校验失败";
+                return;
+            }
+
             ChecksumText = FormatByte(bytes[^1]);
             ChecksumTypeText = "增强";
             ChecksumStatusText = LinFrameCodec.CalculateWriteChecksum(
                 (byte)(bytes[3] & 0x3F),
                 bytes.AsSpan(LinFrameCodec.HeaderLength + 1, dataLength)) == bytes[^1]
+                ? "通过"
+                : "校验失败";
+            return;
+        }
+
+        // 诊断回包：8 字节 PDU + 经典校验，无帧头，不能反算 PID；
+        // 3C/3D 归属与 NAD 检查由业务上下文完成，此处不填入假定的诊断 ID/PID（§13.6）。
+        if (!hasHeader && definition is { IsDiagnostic: true } && bytes.Length == LinFrameCodec.DiagnosticWireLength)
+        {
+            var pdu = bytes.AsSpan(0, LinFrameCodec.DiagnosticPduLength);
+            FrameTypeText = "诊断数据";
+            DataLengthText = $"{LinFrameCodec.DiagnosticPduLength} bytes";
+            PayloadText = FormatBytes(pdu);
+            ChecksumText = FormatByte(bytes[^1]);
+            ChecksumTypeText = "经典";
+            ChecksumStatusText = LinFrameCodec.CalculateClassicChecksum(pdu) == bytes[^1]
                 ? "通过"
                 : "校验失败";
             return;
