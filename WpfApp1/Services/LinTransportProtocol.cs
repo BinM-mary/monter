@@ -1,17 +1,17 @@
-using System.Diagnostics;
 using WpfApp1.Models;
 
 namespace WpfApp1.Services;
 
 /// <summary>
-/// LIN 诊断传输层（TP）：SF 请求编码与 SF/FF/CF 响应重组，与 WPF、串口和界面无关。
-/// 行为依据 WpfApp1诊断架构讨论记录.md §11.3、§14：
+/// LIN 诊断传输层（TP）：请求分包编码与 SF/FF/CF 响应重组，与 WPF、串口和界面无关。
+/// 行为依据 WpfApp1诊断架构讨论记录.md §11.3、§14 与《3C连续帧功能实施计划.md》§4.1：
 /// - 输入为 8 字节 PDU（LIN 校验已由统一接收入口处理，3C 回显不进入 TP）；
 /// - 先检查状态与 NAD，再解释 PCI；错误 NAD 忽略且不刷新 N_Cr；
 /// - SF 长度 1～6；FF 总长度 7～4095，缓冲上限为协议最大值，不为具体业务写死；
 /// - CF 序号 1、2、…、15、0、1…（4 位回绕），错序/重复/新首帧/N_Cr 到期放弃重组；
 /// - “重组已放弃”后不因后续输入重启；消息收齐只交付一次；
-/// - 以普通返回值向协调层报告结果，不建立独立事件系统。
+/// - 以普通返回值向协调层报告结果，不建立独立事件系统；
+/// - 发送编码与接收重组状态完全分开，编码为无串口依赖的纯方法。
 /// </summary>
 public sealed class LinTransportProtocol
 {
@@ -23,8 +23,15 @@ public sealed class LinTransportProtocol
         Completed
     }
 
-    private const int MaxMessageLength = 4095;
+    private const int MaxMessageLength = DiagnosticMultiFrameOptions.EncodingLengthLimit;
 
+    private const int SingleFramePayloadLength = 6;
+
+    private const int FirstFramePayloadLength = 5;
+
+    private const int ConsecutiveFramePayloadLength = 6;
+
+    private readonly TimeProvider timeProvider;
     private readonly object stateLock = new();
     private TpState state = TpState.WaitingFirstFrame;
     private byte expectedNad;
@@ -36,13 +43,19 @@ public sealed class LinTransportProtocol
     private byte[] reassemblyBuffer = [];
     private string? abandonReason;
 
+    /// <summary>注入与诊断模块同源的计时设施；未提供时使用系统时钟。</summary>
+    public LinTransportProtocol(TimeProvider? timeProvider = null)
+    {
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
     /// <summary>
     /// 将一条 UDS 消息编码为单帧 PDU：NAD + PCI(0x0L) + 消息 + 0xFF 填充至 8 字节。
-    /// 当前三个版本请求（3 字节）均为 SF。
+    /// 保留给现有 1～6 字节请求；多帧必须走 <see cref="EncodeRequestFrames"/>。
     /// </summary>
     public static byte[] EncodeSingleFrame(byte nad, ReadOnlySpan<byte> message)
     {
-        if (message.Length is < 1 or > 6)
+        if (message.Length is < 1 or > SingleFramePayloadLength)
         {
             throw new ArgumentException("单帧消息长度必须为 1～6 字节。", nameof(message));
         }
@@ -54,6 +67,109 @@ public sealed class LinTransportProtocol
         // 填充不参与 UDS 消息，但属于 PDU，参与 LIN 校验。
         pdu.AsSpan(2 + message.Length).Fill(0xFF);
         return pdu;
+    }
+
+    /// <summary>
+    /// 将一条完整 UDS 消息编码为一个 SF，或一个 FF 加若干 CF（实施计划 §4.1）。
+    /// 每个 PDU 均为 8 字节：NAD + PCI + 最多 6 字节消息，末帧未使用位置填 0xFF。
+    /// 长度不在 1～maxRequestLength 范围内时抛 <see cref="ArgumentException"/>。
+    /// </summary>
+    public static byte[][] EncodeRequestFrames(
+        byte nad,
+        ReadOnlySpan<byte> message,
+        int maxRequestLength = MaxMessageLength)
+    {
+        if (maxRequestLength is < 1 or > MaxMessageLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxRequestLength),
+                $"最大请求长度必须为 1～{MaxMessageLength} 字节。");
+        }
+
+        if (message.Length == 0)
+        {
+            throw new ArgumentException("请求消息长度不能为 0。", nameof(message));
+        }
+
+        if (message.Length > maxRequestLength)
+        {
+            throw new ArgumentException(
+                $"请求消息长度 {message.Length} 超过允许上限 {maxRequestLength}。",
+                nameof(message));
+        }
+
+        if (message.Length <= SingleFramePayloadLength)
+        {
+            return [EncodeSingleFrame(nad, message)];
+        }
+
+        var frameCount = CalculatePduCount(message.Length);
+        var frames = new byte[frameCount][];
+
+        // FF：PCI 高 4 位固定 1，低 4 位为总长度高 4 位；随后 5 字节消息。
+        var first = new byte[8];
+        first[0] = nad;
+        first[1] = (byte)(0x10 | ((message.Length >> 8) & 0x0F));
+        first[2] = (byte)(message.Length & 0xFF);
+        message[..FirstFramePayloadLength].CopyTo(first.AsSpan(3));
+        frames[0] = first;
+
+        var offset = FirstFramePayloadLength;
+        for (var index = 1; index < frameCount; index++)
+        {
+            var frame = new byte[8];
+            frame[0] = nad;
+            // 序号从 1 开始，按 4 位回绕：1…15、0、1…
+            frame[1] = (byte)(0x20 | (index & 0x0F));
+            var remaining = message.Length - offset;
+            var take = Math.Min(ConsecutiveFramePayloadLength, remaining);
+            message.Slice(offset, take).CopyTo(frame.AsSpan(2));
+            if (take < ConsecutiveFramePayloadLength)
+            {
+                frame.AsSpan(2 + take).Fill(0xFF);
+            }
+
+            frames[index] = frame;
+            offset += take;
+        }
+
+        return frames;
+    }
+
+    /// <summary>按 UDS 消息长度计算 PDU 数：1～6 为 1；大于 6 为 1 + ⌈(L-5)/6⌉。</summary>
+    public static int CalculatePduCount(int messageLength)
+    {
+        if (messageLength <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(messageLength));
+        }
+
+        if (messageLength > MaxMessageLength)
+        {
+            throw new ArgumentOutOfRangeException(nameof(messageLength));
+        }
+
+        return messageLength <= SingleFramePayloadLength
+            ? 1
+            : 1 + ((messageLength - FirstFramePayloadLength) + ConsecutiveFramePayloadLength - 1)
+                / ConsecutiveFramePayloadLength;
+    }
+
+    /// <summary>分包后单个 PDU 承载的有效 UDS 字节数（不含 NAD、PCI 与 0xFF 填充）。</summary>
+    public static int GetUdsPayloadLength(ReadOnlySpan<byte> pdu)
+    {
+        if (pdu.Length != 8)
+        {
+            return 0;
+        }
+
+        return (pdu[1] >> 4) switch
+        {
+            0 => pdu[1] & 0x0F,
+            1 => FirstFramePayloadLength,
+            2 => ConsecutiveFramePayloadLength,
+            _ => 0
+        };
     }
 
     /// <summary>为一笔新业务建立“等待首帧”状态；不清空共用串口字节缓存（§12.4）。</summary>
@@ -239,8 +355,8 @@ public sealed class LinTransportProtocol
         return TpReceiveResult.Abandoned(reason);
     }
 
-    private static long ToTimestampUnits(TimeSpan timeout)
+    private long ToTimestampUnits(TimeSpan timeout)
     {
-        return (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        return (long)(timeout.TotalSeconds * timeProvider.TimestampFrequency);
     }
 }

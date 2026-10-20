@@ -16,8 +16,9 @@ public sealed class LinFrameChannel : IDisposable
     private readonly ISerialPortConnectionService connectionService;
     private readonly ICommunicationLogService communicationLog;
     private readonly LinReadReplyParser parser;
+    private readonly TimeProvider timeProvider;
     private readonly object stateLock = new();
-    private readonly Timer receiveTimer;
+    private readonly ITimer receiveTimer;
     private readonly TimeSpan frameAssemblyTimeout;
     private bool isConnected;
     private bool disposed;
@@ -26,10 +27,12 @@ public sealed class LinFrameChannel : IDisposable
         ISerialPortConnectionService connectionService,
         ICommunicationLogService communicationLog,
         LinFrameCatalog catalog,
-        TimeSpan? frameAssemblyTimeout = null)
+        TimeSpan? frameAssemblyTimeout = null,
+        TimeProvider? timeProvider = null)
     {
         this.connectionService = connectionService ?? throw new ArgumentNullException(nameof(connectionService));
         this.communicationLog = communicationLog ?? throw new ArgumentNullException(nameof(communicationLog));
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         Catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.frameAssemblyTimeout = frameAssemblyTimeout ?? TimeSpan.FromMilliseconds(50);
         if (this.frameAssemblyTimeout <= TimeSpan.Zero)
@@ -37,7 +40,7 @@ public sealed class LinFrameChannel : IDisposable
             throw new ArgumentOutOfRangeException(nameof(frameAssemblyTimeout));
         }
 
-        parser = new LinReadReplyParser(catalog);
+        parser = new LinReadReplyParser(catalog, this.timeProvider);
         parser.FrameReceived += HandleFrameReceived;
         parser.FrameRejected += HandleFrameRejected;
         parser.DiagnosticFrameReceived += HandleDiagnosticFrameReceived;
@@ -45,7 +48,11 @@ public sealed class LinFrameChannel : IDisposable
         connectionService.BytesReceived += HandleBytesReceived;
         connectionService.ConnectionStateChanged += HandleConnectionStateChanged;
         // 10ms 检查一次：缓存非空且超过 50ms 未收到新字节即丢弃残缺回复。
-        receiveTimer = new Timer(ExpirePartialFrame, null, 10, 10);
+        receiveTimer = this.timeProvider.CreateTimer(
+            ExpirePartialFrame,
+            null,
+            TimeSpan.FromMilliseconds(10),
+            TimeSpan.FromMilliseconds(10));
     }
 
     public LinFrameCatalog Catalog { get; }
@@ -126,6 +133,15 @@ public sealed class LinFrameChannel : IDisposable
         return WriteAsync(LinFrameCodec.CreateReadRequest(definition.Id), definition, cancellationToken);
     }
 
+    /// <summary>
+    /// 等待传输层真实写入排空：以发送工作线程的实际完成信号为准。
+    /// 外层 Send 等待被取消不代表物理写入已结束（审查方案 §4.3，F3/R8）。
+    /// </summary>
+    public Task WaitForTransmitIdleAsync()
+    {
+        return connectionService.WaitForTransmitIdleAsync();
+    }
+
     public void Dispose()
     {
         lock (stateLock)
@@ -170,9 +186,26 @@ public sealed class LinFrameChannel : IDisposable
 
         await connectionService.SendAsync(raw, cancellationToken).ConfigureAwait(false);
         // 完成时刻在串口写入返回后、记录报文前取得，作为软件观察到的写入完成时间。
-        var completedTimestamp = Stopwatch.GetTimestamp();
+        var completedTimestamp = timeProvider.GetTimestamp();
         communicationLog.RecordSent(raw, definition);
         return new FrameWriteReceipt(completedTimestamp);
+    }
+
+    /// <summary>
+    /// 解析器边界：丢弃共享缓存中的不完整候选并保留拒绝日志（实施计划 §4.5）。
+    /// 供协调层在诊断阶段切换前调用，避免旧阶段残缺字节被当成新阶段响应。
+    /// </summary>
+    public void DiscardPartialReceiveBuffer(string reason)
+    {
+        lock (stateLock)
+        {
+            if (disposed || !isConnected)
+            {
+                return;
+            }
+
+            parser.DiscardPartialCandidate(reason);
+        }
     }
 
     private void HandleBytesReceived(byte[] bytes)

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using WpfApp1.Models;
 
 namespace WpfApp1.Services;
@@ -12,18 +11,21 @@ namespace WpfApp1.Services;
 /// 两种校验可区分：经典校验帧经增强逆运算恒得 PID 0x00 且奇偶自洽失败；
 /// 增强校验帧的经典校验值包含 PID 种子贡献，二者不会互相误判。
 /// 经典校验也失败的字节组仍按错误/未知数据记录并逐字节重同步。
+/// 所有时间戳使用与诊断模块同源的 <see cref="TimeProvider"/>。
 /// </summary>
 public sealed class LinReadReplyParser
 {
     private readonly LinFrameCatalog catalog;
+    private readonly TimeProvider timeProvider;
     private readonly List<byte> bufferedBytes = [];
     private readonly int[] candidateLengths;
     private readonly int[] diagnosticCandidateLengths;
     private long lastAppendTimestamp;
 
-    public LinReadReplyParser(LinFrameCatalog catalog)
+    public LinReadReplyParser(LinFrameCatalog catalog, TimeProvider? timeProvider = null)
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         candidateLengths = catalog.Definitions
             .Select(definition => definition.DataLength + 1)
             .Distinct()
@@ -52,7 +54,7 @@ public sealed class LinReadReplyParser
         var results = new List<ParseResult>();
         lock (bufferedBytes)
         {
-            lastAppendTimestamp = Stopwatch.GetTimestamp();
+            lastAppendTimestamp = timeProvider.GetTimestamp();
             bufferedBytes.AddRange(bytes.ToArray());
             if (candidateLengths.Length == 0)
             {
@@ -135,7 +137,7 @@ public sealed class LinReadReplyParser
         lock (bufferedBytes)
         {
             if (bufferedBytes.Count == 0
-                || Stopwatch.GetElapsedTime(lastAppendTimestamp) < inactivityTimeout)
+                || timeProvider.GetElapsedTime(lastAppendTimestamp) < inactivityTimeout)
             {
                 return;
             }
@@ -145,6 +147,29 @@ public sealed class LinReadReplyParser
         }
 
         FrameRejected?.Invoke(raw, null, "串口回复接收不完整，等待后续字节超时");
+    }
+
+    /// <summary>
+    /// 解析器边界：丢弃当前不完整的共享缓存，并把残留字节作为一条拒绝记录交给日志
+    /// （实施计划 §4.5）。用于诊断阶段切换，避免旧阶段的残缺候选被当成新阶段的响应。
+    /// 与 <see cref="Append"/> 共用同一缓冲锁，保证不静默丢失数据。
+    /// </summary>
+    public void DiscardPartialCandidate(string reason)
+    {
+        byte[] raw;
+        lock (bufferedBytes)
+        {
+            if (bufferedBytes.Count == 0)
+            {
+                return;
+            }
+
+            raw = bufferedBytes.ToArray();
+            bufferedBytes.Clear();
+            lastAppendTimestamp = 0;
+        }
+
+        FrameRejected?.Invoke(raw, null, reason);
     }
 
     public void Reset()
@@ -210,7 +235,7 @@ public sealed class LinReadReplyParser
             }
             else if (result.DiagnosticPdu is not null)
             {
-                DiagnosticFrameReceived?.Invoke(result.Raw, result.DiagnosticPdu, true, Stopwatch.GetTimestamp());
+                DiagnosticFrameReceived?.Invoke(result.Raw, result.DiagnosticPdu, true, timeProvider.GetTimestamp());
             }
             else
             {

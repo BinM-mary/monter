@@ -9,13 +9,16 @@ public enum DeviceVersionKind
 }
 
 /// <summary>
-/// 一笔诊断业务的时间配置。当前三个版本读取共用：
-/// 首次 3D 延迟与节拍 20 ms、业务总截止 t0+5 s、3C 回显等待 1000 ms、N_Cr 1000 ms（§10）。
+/// 一笔 SF 诊断业务的时间配置。当前三个版本读取共用：
+/// 3D 首拍与节拍均按 <see cref="ResponsePollPeriod"/>、业务总截止 t0+5 s、
+/// 3C 回显等待 1000 ms、N_Cr 1000 ms（§10）。
+/// 多帧请求不使用本类型，改由 <see cref="DiagnosticMultiFrameOptions"/> 提供参数。
 /// </summary>
 public sealed record DiagnosticTiming
 {
     public static DiagnosticTiming Default { get; } = new();
 
+    /// <summary>保留字段：SF 路径当前不使用；多帧首次 3D 延迟见 <see cref="DiagnosticResponseTiming"/>。</summary>
     public TimeSpan FirstResponsePollDelay { get; init; } = TimeSpan.FromMilliseconds(20);
 
     public TimeSpan ResponsePollPeriod { get; init; } = TimeSpan.FromMilliseconds(20);
@@ -41,7 +44,14 @@ public sealed record DiagnosticRequest
     /// <summary>预期正响应前缀（如 62 F1 95）；长度不足或不匹配按业务响应不匹配结束（§15.1）。</summary>
     public required byte[] ExpectedResponsePrefix { get; init; }
 
+    /// <summary>SF（1～6 字节）路径的原有时间配置；多帧请求完全忽略该属性（实施计划 §4.10）。</summary>
     public DiagnosticTiming Timing { get; init; } = DiagnosticTiming.Default;
+
+    /// <summary>
+    /// 多帧（长度 &gt; 6）请求必须显式提供的选项；SF 请求保持为 null。
+    /// 长度 &gt; 6 且为 null 时入队前以 InvalidRequest 拒绝，不回退到 <see cref="Timing"/>。
+    /// </summary>
+    public DiagnosticMultiFrameOptions? MultiFrameOptions { get; init; }
 }
 
 public enum DiagnosticFailureReason
@@ -54,17 +64,105 @@ public enum DiagnosticFailureReason
     /// <summary>3C 串口写入失败（非断线）。</summary>
     RequestWriteFailed,
 
-    /// <summary>完整响应的服务号/DID 与预期前缀不匹配（§15.1）。</summary>
+    /// <summary>完整响应的服务号/DID 与预期前缀不匹配（§15.1；负响应 7F 也按此报告）。</summary>
     ResponseMismatch,
 
-    /// <summary>t0 + 5 s 总截止（§10）。</summary>
+    /// <summary>原 SF 路径 t0 + 5 s 总截止（§10）；多帧不复用该值隐藏失败阶段。</summary>
     DeadlineExceeded,
 
     /// <summary>串口断开：当前业务失败并清空排队诊断（§11.5）。</summary>
     Disconnected,
 
     /// <summary>应用退出/服务释放。</summary>
-    Shutdown
+    Shutdown,
+
+    /// <summary>单片写入等待超时，可能存在在途未知状态（实施计划 §4.9.2）。</summary>
+    RequestWriteTimeout,
+
+    /// <summary>发送阶段预算耗尽（实施计划 §4.3、§4.9.2）。</summary>
+    SendDeadlineExceeded,
+
+    /// <summary>不能满足最大相邻分片间隔（实施计划 §4.9.2）。</summary>
+    InterFrameDeadlineExceeded,
+
+    /// <summary>多帧请求的响应预算耗尽，包含固定回显隔离期（实施计划 §4.3）。</summary>
+    ResponseDeadlineExceeded,
+
+    /// <summary>已确认的归属规则被破坏，或遇到不能安全交付 TP 的模糊候选（实施计划 §4.5）。</summary>
+    ProtocolAttributionError,
+
+    /// <summary>调用者取消（实施计划 §4.11）。</summary>
+    Cancelled,
+
+    /// <summary>前序事务中止整批而清空队列，或处于失败收尾期；本请求未发送（实施计划 §4.4.1）。</summary>
+    QueueAborted,
+
+    /// <summary>跨事务门禁已关闭、诊断准入暂停；需显式复位或重启（实施计划 §4.4.2）。</summary>
+    DiagnosticGateClosed,
+
+    /// <summary>长度、必填多帧选项或参数组合非法，发送前拒绝（实施计划 §4.9.2）。</summary>
+    InvalidRequest
+}
+
+/// <summary>事务阶段，用于进度快照与 FailedPhase 断言；不使用自由文本阶段名（实施计划 §4.9.1）。</summary>
+public enum DiagnosticPhase
+{
+    /// <summary>入队前校验；InvalidRequest、预取消、恢复门禁拒绝时使用。</summary>
+    Validating,
+
+    /// <summary>已入队尚未执行；排队取消、断线或被整批清空时使用。</summary>
+    Queued,
+
+    /// <summary>已出队，正在获取独占且尚未发送。</summary>
+    EnteringDiagnostic,
+
+    /// <summary>请求写入、逐片确认或帧间隔等待；包括 SF 请求写入阶段。</summary>
+    SendingRequest,
+
+    /// <summary>多帧发送完成后的固定回显隔离。</summary>
+    EchoDrain,
+
+    /// <summary>响应读取与重组；SF 并行等待有效回显和响应也归此阶段。</summary>
+    WaitingResponse,
+
+    /// <summary>本笔仍待完成时执行必要的失败恢复/跨事务隔离。</summary>
+    Recovery,
+
+    /// <summary>本笔仍待完成时处理收尾。</summary>
+    Finalizing
+}
+
+/// <summary>
+/// 一笔事务的不可变进度快照（实施计划 §4.9.1）。索引从 0 开始；
+/// 计数关系：EchoConfirmedCount、SerialWriteCompletedCount 均不得超过 WriteAttemptCount。
+/// </summary>
+public sealed record DiagnosticProgress
+{
+    public static DiagnosticProgress Empty { get; } = new();
+
+    /// <summary>校验/分包成功后预计 PDU 数；尚未确定时为 null。</summary>
+    public int? TotalPduCount { get; init; }
+
+    /// <summary>已调用发送出口的 PDU 数，含当前失败或未知完成状态的一片。</summary>
+    public int WriteAttemptCount { get; init; }
+
+    /// <summary>已取得成功写入回执的 PDU 数，不等于已上总线或设备已接收。</summary>
+    public int SerialWriteCompletedCount { get; init; }
+
+    /// <summary>已确认有效回显的 PDU 数，重复回显不累计。</summary>
+    public int EchoConfirmedCount { get; init; }
+
+    /// <summary>成功写入分片内的有效 UDS 字节之和，排除 NAD、PCI、填充和校验。</summary>
+    public int UdsBytesWriteCompleted { get; init; }
+
+    /// <summary>结束时当前操作分片索引；尚未开始或无当前分片时为 null。</summary>
+    public int? CurrentPduIndex { get; init; }
+
+    /// <summary>失败发生阶段；成功时为 null。终止原因首次胜出时快照，收尾不得覆盖。</summary>
+    public DiagnosticPhase? FailedPhase { get; init; }
+
+    /// <summary>最终结果确定时是否仍有未取得明确结果的写入，避免把未知误报为未发送。</summary>
+    public bool InFlightWriteAtCompletion { get; init; }
 }
 
 /// <summary>
@@ -73,12 +171,18 @@ public enum DiagnosticFailureReason
 /// </summary>
 public sealed class DiagnosticResult
 {
-    private DiagnosticResult(bool success, byte[]? response, DiagnosticFailureReason reason, string? tpAbandonReason)
+    private DiagnosticResult(
+        bool success,
+        byte[]? response,
+        DiagnosticFailureReason reason,
+        string? tpAbandonReason,
+        DiagnosticProgress progress)
     {
         Success = success;
         Response = response;
         Reason = reason;
         TpAbandonReason = tpAbandonReason;
+        Progress = progress;
     }
 
     public bool Success { get; }
@@ -90,11 +194,20 @@ public sealed class DiagnosticResult
 
     public string? TpAbandonReason { get; }
 
-    public static DiagnosticResult Succeeded(byte[] response, string? tpAbandonReason = null) =>
-        new(true, response, DiagnosticFailureReason.None, tpAbandonReason);
+    /// <summary>最终进度快照（实施计划 §4.9.1）；结果发布后不再变化。</summary>
+    public DiagnosticProgress Progress { get; }
 
-    public static DiagnosticResult Failed(DiagnosticFailureReason reason, string? tpAbandonReason = null) =>
-        new(false, null, reason, tpAbandonReason);
+    public static DiagnosticResult Succeeded(
+        byte[] response,
+        DiagnosticProgress? progress = null,
+        string? tpAbandonReason = null) =>
+        new(true, response, DiagnosticFailureReason.None, tpAbandonReason, progress ?? DiagnosticProgress.Empty);
+
+    public static DiagnosticResult Failed(
+        DiagnosticFailureReason reason,
+        string? tpAbandonReason = null,
+        DiagnosticProgress? progress = null) =>
+        new(false, null, reason, tpAbandonReason, progress ?? DiagnosticProgress.Empty);
 }
 
 public enum TpOutcome
@@ -147,7 +260,7 @@ public sealed class FrameWriteReceipt
         CompletedTimestamp = completedTimestamp;
     }
 
-    /// <summary>Stopwatch.GetTimestamp() 体系的完成时刻，用作 t0 等计时锚点。</summary>
+    /// <summary>与诊断模块同源 <see cref="TimeProvider"/> 的完成时刻，用作 t0 等计时锚点。</summary>
     public long CompletedTimestamp { get; }
 }
 

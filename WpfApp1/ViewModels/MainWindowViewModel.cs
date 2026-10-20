@@ -30,14 +30,24 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             new LinFrameDefinition(0x3C, 8, LinPublisher.Master, LinChecksumType.Classic),
             new LinFrameDefinition(0x3D, 8, LinPublisher.Slave, LinChecksumType.Classic)
         ]);
-        FrameChannel = new LinFrameChannel(connectionService, CommunicationLog, FrameCatalog);
+        FrameChannel = new LinFrameChannel(
+            connectionService,
+            CommunicationLog,
+            FrameCatalog,
+            timeProvider: TimeProvider.System);
         // 0x15 写入帧的当前数据状态：界面操作修改字段，调度每拍按快照组帧。
         MotorCommands = new MotorCommandService();
         // 统一发送调度器：应用通信 100 ms 一拍（先写 0x15 再读 0x33），
         // 诊断期间按单帧边界暂停应用发送，诊断队列清空后从保存游标恢复。
-        BusScheduler = new LinBusScheduler(FrameChannel, MotorCommands);
+        BusScheduler = new LinBusScheduler(
+            FrameChannel,
+            MotorCommands,
+            timeProvider: TimeProvider.System);
         // 诊断事务协调层：同一总线串行执行，3C 回显核对、超时与统一收尾。
-        Diagnostics = new DiagnosticTransactionService(FrameChannel, BusScheduler);
+        Diagnostics = new DiagnosticTransactionService(
+            FrameChannel,
+            BusScheduler,
+            TimeProvider.System);
         DeviceInfo = new DeviceInformationService(Diagnostics);
         ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, MotorCommands, DeviceInfo, Diagnostics);
         FrameChannel.FrameReceived += HandleStatusFrameReceived;

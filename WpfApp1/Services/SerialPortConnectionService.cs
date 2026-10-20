@@ -29,6 +29,7 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
     private SerialPort? serialPort;
     private long lastReceiveTimestamp;
     private long connectionGeneration;
+    private PendingWrite? lastTransmitRequest;
     private int disposed;
 
     public SerialPortConnectionService()
@@ -102,6 +103,8 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
                     connectionGeneration,
                     cancellationToken);
                 transmitQueue.Enqueue(request);
+                // 记录最近一次已提交的写入：排空等待以发送工作线程的实际完成信号为准（F3）。
+                lastTransmitRequest = request;
             }
 
             transmitSignal.Release();
@@ -115,6 +118,36 @@ public sealed class SerialPortConnectionService : ISerialPortConnectionService, 
         await request!.Completion.Task
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 等待最近一次已提交写入的真实完成。发送按单工作线程 FIFO 串行执行，
+    /// 等待最近一次提交即覆盖“已排队 + 正在写入”两层在途。
+    /// 等待方取消（SendAsync 的 WaitAsync 包装抛出 OCE）不改变这里的等待对象；
+    /// 已取消但仍在队列中的请求最终由工作线程置为取消完成，同样会释放本等待。
+    /// </summary>
+    public async Task WaitForTransmitIdleAsync()
+    {
+        PendingWrite? last;
+        lock (syncRoot)
+        {
+            last = lastTransmitRequest;
+        }
+
+        if (last is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await last.Completion.Task.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            // 排空等待只关心占用结束；失败原因由发起方（调度器/协调层）处理。
+            Debug.WriteLine(exception);
+        }
     }
 
     public void Dispose()

@@ -27,5 +27,11 @@ public interface ISerialPortConnectionService
 
     Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 等待最近一次已提交写入的真实完成：该信号由发送工作线程的实际写入结束路径产生，
+    /// 不因某个等待方的 CancellationToken 取消而提前返回（审查方案 §4.3，F3）。
+    /// </summary>
+    Task WaitForTransmitIdleAsync();
+
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 }

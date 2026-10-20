@@ -30,11 +30,21 @@ public sealed class DeviceVersionResult
     {
         DiagnosticFailureReason.EchoTimeout => "未收到 3C 回显",
         DiagnosticFailureReason.RequestWriteFailed => "诊断请求发送失败",
+        DiagnosticFailureReason.RequestWriteTimeout => "诊断请求写入超时",
         DiagnosticFailureReason.ResponseMismatch => "设备响应与预期不符",
         DiagnosticFailureReason.DeadlineExceeded => "等待设备响应超时",
+        DiagnosticFailureReason.ResponseDeadlineExceeded => "等待设备响应超时",
+        DiagnosticFailureReason.SendDeadlineExceeded => "诊断请求发送超时",
+        DiagnosticFailureReason.InterFrameDeadlineExceeded => "诊断分片间隔超限",
+        DiagnosticFailureReason.ProtocolAttributionError => "诊断响应归属异常",
+        DiagnosticFailureReason.Cancelled => "诊断已取消",
+        DiagnosticFailureReason.QueueAborted => "诊断已中止",
+        DiagnosticFailureReason.DiagnosticGateClosed => "诊断已锁止，需复位或重启",
+        DiagnosticFailureReason.InvalidRequest => "诊断请求参数非法",
         DiagnosticFailureReason.Disconnected => "串口已断开",
         DiagnosticFailureReason.Shutdown => "诊断已终止",
-        _ => "读取失败"
+        // 未知未来枚举保留兜底，但显示原因标识，避免掩盖已知值遗漏（实施计划 §4.9.2）。
+        _ => $"读取失败（{FailureReason}）"
     };
 }
 

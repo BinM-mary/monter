@@ -31,9 +31,10 @@ public sealed class LinBusScheduler : IDisposable
     private readonly LinFrameChannel channel;
     private readonly MotorCommandService? motorCommands;
     private readonly TimeSpan appPeriod;
+    private readonly TimeProvider timeProvider;
     private readonly object stateLock = new();
-    private readonly Timer appTimer;
-    private readonly Timer pollTimer;
+    private readonly ITimer appTimer;
+    private readonly ITimer pollTimer;
     private readonly byte[] statusReadIds;
 
     private SchedulerMode mode = SchedulerMode.Disconnected;
@@ -41,23 +42,33 @@ public sealed class LinBusScheduler : IDisposable
     private int statusReadIndex;
     private bool pauseRequested;
     private bool pollingActive;
-    private long pollAnchor;
+    private long pollFirstTarget;
     private long pollPeriod;
     private long pollDeadline;
     private int pollBeatIndex;
+
+    /// <summary>本轮询所属事务的身份令牌：随 3D 提交通知回传，旧通知不能打开新事务的认领（F2 §3.3-1）。</summary>
+    private object? pollOwnerToken;
+
     private Task? activeSendTask;
     private bool sendBusy;
     private long sendGeneration;
+
+    /// <summary>独占申请代次：每次申请与每次撤销都递增，迟到的旧申请不得切换模式（F4）。</summary>
+    private long enterRequestGeneration;
+
     private bool disposed;
 
     public LinBusScheduler(
         LinFrameChannel channel,
         MotorCommandService? motorCommands = null,
-        TimeSpan? appPeriod = null)
+        TimeSpan? appPeriod = null,
+        TimeProvider? timeProvider = null)
     {
         this.channel = channel ?? throw new ArgumentNullException(nameof(channel));
         this.motorCommands = motorCommands;
         this.appPeriod = appPeriod ?? TimeSpan.FromMilliseconds(100);
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         if (this.appPeriod <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(appPeriod));
@@ -68,8 +79,16 @@ public sealed class LinBusScheduler : IDisposable
             .Select(definition => definition.Id)
             .ToArray();
 
-        appTimer = new Timer(AppTimerCallback, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-        pollTimer = new Timer(PollTimerCallback, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        appTimer = this.timeProvider.CreateTimer(
+            AppTimerCallback,
+            null,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
+        pollTimer = this.timeProvider.CreateTimer(
+            PollTimerCallback,
+            null,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
         channel.ConnectionStateChanged += HandleConnectionStateChanged;
     }
 
@@ -85,12 +104,30 @@ public sealed class LinBusScheduler : IDisposable
     }
 
     /// <summary>
+    /// 一次 3D 读取即将开始提交时触发（在调度锁之外，先于通道写入）。
+    /// 参数为该轮询所属事务的身份令牌；协调层据此开始有界暂存候选（F2）。
+    /// </summary>
+    public event Action<object?>? DiagnosticReadAttemptStarting;
+
+    /// <summary>
+    /// 一次 3D 读取写入取得成功回执后触发（在调度锁与通道锁之外）。
+    /// 协调层据此确认“本笔已提供实际读取机会”，才开放响应认领（F2，审查方案 §3.3）。
+    /// </summary>
+    public event Action<object?>? DiagnosticReadCommitted;
+
+    /// <summary>一次 3D 读取写入失败后触发；暂存候选随本次未提交上下文一并丢弃（F2 §3.3-5）。</summary>
+    public event Action<object?>? DiagnosticReadAttemptFailed;
+
+    /// <summary>
     /// 申请暂停应用发送并进入诊断独占：等待当前单帧串口写入完成，不等待应用回复。
     /// 已处于诊断独占时立即返回；串口未连接时抛出，由协调层结束业务。
+    /// 申请绑定代次：被 <see cref="CancelPendingEnterRequest"/> 撤销或被更新批次取代后，
+    /// 迟到的完成不得再切换模式（F4 §5.2）。
     /// </summary>
     public async Task EnterDiagnosticModeAsync()
     {
         Task? runningSend;
+        long requestGeneration;
         lock (stateLock)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
@@ -104,6 +141,7 @@ public sealed class LinBusScheduler : IDisposable
                 throw new InvalidOperationException("串口未连接，不能进入诊断模式。");
             }
 
+            requestGeneration = ++enterRequestGeneration;
             pauseRequested = true;
             runningSend = activeSendTask;
         }
@@ -122,10 +160,34 @@ public sealed class LinBusScheduler : IDisposable
                 throw new InvalidOperationException("串口断开，诊断模式未能建立。");
             }
 
+            if (requestGeneration != enterRequestGeneration)
+            {
+                // 申请已被撤销或被更新批次取代：不切换模式、不清除暂停标志
+                //（清除属于撤销方，避免误清更新批次的暂停意图）。
+                return;
+            }
+
             mode = SchedulerMode.DiagnosticExclusive;
             pollingActive = false;
             appTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    /// <summary>
+    /// 撤销尚未完成的独占申请：提升代次并清除暂停意图。
+    /// 只应在协调层确认已无有效等待者时调用（F4 §5.2 第 6 条）；
+    /// 该撤销只影响独占意图，不撤回已开始的应用帧写入。
+    /// </summary>
+    public void CancelPendingEnterRequest()
+    {
+        lock (stateLock)
+        {
+            enterRequestGeneration++;
+            if (mode == SchedulerMode.AppRunning)
+            {
+                pauseRequested = false;
+            }
         }
     }
 
@@ -158,10 +220,16 @@ public sealed class LinBusScheduler : IDisposable
     }
 
     /// <summary>
-    /// 启动本笔业务的 3D 轮询：自 t0 起按固定节拍发送，首次在 t0 + firstPeriod。
-    /// 达到 deadline 后不再启动新的 3D。
+    /// 启动本笔业务的 3D 轮询：首个 3D 在 anchor + firstDelay，之后按 period 固定节拍发送；
+    /// 达到 deadline 后不再启动新的 3D。SF 路径将 firstDelay 与 period 传同一值，保持原有首拍行为；
+    /// 多帧路径的 firstDelay 由隔离窗口与首次读取延迟共同决定（实施计划 §4.3）。
     /// </summary>
-    public void StartResponsePolling(long t0, TimeSpan period, long deadline)
+    public void StartResponsePolling(
+        long anchor,
+        TimeSpan firstDelay,
+        TimeSpan period,
+        long deadline,
+        object? ownerToken = null)
     {
         lock (stateLock)
         {
@@ -171,7 +239,8 @@ public sealed class LinBusScheduler : IDisposable
             }
 
             pollingActive = true;
-            pollAnchor = t0;
+            pollOwnerToken = ownerToken;
+            pollFirstTarget = anchor + ToTimestampUnits(firstDelay);
             pollPeriod = ToTimestampUnits(period);
             if (pollPeriod <= 0)
             {
@@ -190,16 +259,34 @@ public sealed class LinBusScheduler : IDisposable
         lock (stateLock)
         {
             pollingActive = false;
+            if (disposed)
+            {
+                return;
+            }
+
             pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
     }
 
-    public Task WaitForSendIdleAsync()
+    /// <summary>
+    /// 等待发送出口空闲：先等调度器登记的在途任务，再等传输层真实写入排空。
+    /// 外层 Send 等待被取消不代表物理写入已结束，排空以发送工作线程的
+    /// 实际完成信号为准（F3/R8，审查方案 §4.3）。
+    /// </summary>
+    public async Task WaitForSendIdleAsync()
     {
+        Task? pending;
         lock (stateLock)
         {
-            return activeSendTask is { } pending ? WaitSafeAsync(pending) : Task.CompletedTask;
+            pending = activeSendTask;
         }
+
+        if (pending is not null)
+        {
+            await WaitSafeAsync(pending).ConfigureAwait(false);
+        }
+
+        await channel.WaitForTransmitIdleAsync().ConfigureAwait(false);
     }
 
     /// <summary>退出诊断模式并从保存的游标位置恢复应用发送，随后衔接 100 ms 整拍。</summary>
@@ -297,7 +384,7 @@ public sealed class LinBusScheduler : IDisposable
                 return;
             }
 
-            var now = Stopwatch.GetTimestamp();
+            var now = timeProvider.GetTimestamp();
             if (now >= pollDeadline)
             {
                 pollingActive = false;
@@ -309,7 +396,8 @@ public sealed class LinBusScheduler : IDisposable
             {
                 sendBusy = true;
                 var generation = ++sendGeneration;
-                toStart = SendDiagnosticReadCoreAsync(generation);
+                var owner = pollOwnerToken;
+                toStart = SendDiagnosticReadCoreAsync(generation, owner);
                 activeSendTask = toStart;
             }
 
@@ -321,14 +409,14 @@ public sealed class LinBusScheduler : IDisposable
 
     private void ScheduleNextPollLocked()
     {
-        var now = Stopwatch.GetTimestamp();
-        while (pollAnchor + (long)pollBeatIndex * pollPeriod < now)
+        var now = timeProvider.GetTimestamp();
+        // 目标节拍 = 首拍时刻 + (index - 1) × period；错过则跳过，不补发。
+        while (pollFirstTarget + (long)(pollBeatIndex - 1) * pollPeriod < now)
         {
-            // 该拍已错过：跳过，不补发。
             pollBeatIndex++;
         }
 
-        var target = pollAnchor + (long)pollBeatIndex * pollPeriod;
+        var target = pollFirstTarget + (long)(pollBeatIndex - 1) * pollPeriod;
         if (!pollingActive || target >= pollDeadline)
         {
             pollingActive = false;
@@ -402,22 +490,59 @@ public sealed class LinBusScheduler : IDisposable
         }
     }
 
-    private async Task SendDiagnosticReadCoreAsync(long generation)
+    private async Task SendDiagnosticReadCoreAsync(long generation, object? ownerToken)
     {
+        // 本方法可能由 PollTimerCallback 在调度锁内同步进入；先让出执行权，
+        // 确保提交/完成通知都在调度锁与通道锁之外触发，不构成“调度锁 → 协调层锁”锁环（F2）。
+        await Task.Yield();
+
         try
         {
+            RaiseReadAttemptStarting(ownerToken);
             await channel.SendDiagnosticReadRequestAsync().ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             // 3D 发送失败（多为断线）记日志；业务结束由协调层的断线与截止规则处理。
             Debug.WriteLine(exception);
+            RaiseReadAttemptFailed(ownerToken);
+            return;
         }
         finally
         {
             ClearSendTask(generation);
         }
+
+        // 写入取得成功回执：通知协调层“本笔已提供实际读取机会”，随后才允许响应认领（F2）。
+        RaiseReadCommitted(ownerToken);
     }
+
+    /// <summary>通知处理器异常不得中断发送调度；协调层的问题是协调层的事。</summary>
+    private static void RaiseSafely(Action<object?>? handler, object? ownerToken)
+    {
+        if (handler is null)
+        {
+            return;
+        }
+
+        try
+        {
+            handler(ownerToken);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+        }
+    }
+
+    private void RaiseReadAttemptStarting(object? ownerToken) =>
+        RaiseSafely(DiagnosticReadAttemptStarting, ownerToken);
+
+    private void RaiseReadCommitted(object? ownerToken) =>
+        RaiseSafely(DiagnosticReadCommitted, ownerToken);
+
+    private void RaiseReadAttemptFailed(object? ownerToken) =>
+        RaiseSafely(DiagnosticReadAttemptFailed, ownerToken);
 
     private async Task<FrameWriteReceipt> SendDiagnosticRequestCoreAsync(
         ReadOnlyMemory<byte> pdu,
@@ -497,13 +622,13 @@ public sealed class LinBusScheduler : IDisposable
         }
     }
 
-    private static long ToTimestampUnits(TimeSpan value)
+    private long ToTimestampUnits(TimeSpan value)
     {
-        return (long)(value.TotalSeconds * Stopwatch.Frequency);
+        return (long)(value.TotalSeconds * timeProvider.TimestampFrequency);
     }
 
-    private static TimeSpan FromTimestampUnits(long delta)
+    private TimeSpan FromTimestampUnits(long delta)
     {
-        return delta <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)delta / Stopwatch.Frequency);
+        return delta <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)delta / timeProvider.TimestampFrequency);
     }
 }
