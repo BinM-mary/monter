@@ -4,7 +4,7 @@ using WpfApp1.Models;
 namespace WpfApp1.Services;
 
 /// <summary>
-/// 共用的 LIN 单帧通道。应用帧与诊断均复用串口队列和接收分发（WpfApp1诊断架构讨论记录.md §12.4）。
+/// 共用的 LIN 单帧通道。应用帧与诊断均复用串口队列和接收分发（架构/WpfApp1诊断架构讨论记录.md §12.4）。
 /// 应用读取请求为 5 字节（55 AA 55 PID 00）；应用回复只有 DATA + Checksum，
 /// 由 LinReadReplyParser 反算 PID/ID 后分发；诊断候选为 8 字节 PDU + 经典校验，
 /// 3C/3D 归属、NAD 检查与重组由上层业务上下文完成，入口不虚构诊断 PID。

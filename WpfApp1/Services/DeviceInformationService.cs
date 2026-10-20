@@ -49,7 +49,7 @@ public sealed class DeviceVersionResult
 }
 
 /// <summary>
-/// 设备信息业务层（WpfApp1诊断架构讨论记录.md §2、§6）：
+/// 设备信息业务层（架构/WpfApp1诊断架构讨论记录.md §2、§6）：
 /// 只做请求构造、响应解释与界面文案，不处理 TP、调度和超时；
 /// 响应长度按 FF 声明动态处理，不为具体版本写死长度或读取次数。
 /// </summary>

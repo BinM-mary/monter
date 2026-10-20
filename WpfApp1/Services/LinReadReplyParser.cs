@@ -3,7 +3,7 @@ using WpfApp1.Models;
 namespace WpfApp1.Services;
 
 /// <summary>
-/// 组装"DATA + Checksum"格式的回复（应用与诊断共用一个字节缓存，WpfApp1诊断架构讨论记录.md §13）。
+/// 组装"DATA + Checksum"格式的回复（应用与诊断共用一个字节缓存，架构/WpfApp1诊断架构讨论记录.md §13）。
 /// 回复没有 Break、Sync、PID 或长度字段，以已登记帧的 DataLength + 1 作为候选长度：
 /// 应用回复先尝试增强校验逆运算（反算候选 PID → P0/P1 自洽 → 帧表匹配 → 复算校验）；
 /// 失败后若为诊断候选长度（8 字节 PDU + 1 字节经典校验）且经典校验通过，

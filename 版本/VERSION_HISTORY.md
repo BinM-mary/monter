@@ -19,4 +19,4 @@ git switch -c review/<分支名> <标签名>
 git show --no-patch --format=fuller <标签名>
 ```
 
-标签保存 Git 跟踪的源码和文档；`bin/obj` 和程序运行目录下的本地配置不在版本标记中。当前协议以 [PROTOCOL.md](PROTOCOL.md) 为准。
+标签保存 Git 跟踪的源码和文档；`bin/obj` 和程序运行目录下的本地配置不在版本标记中。当前协议以 [PROTOCOL.md](../协议/PROTOCOL.md) 为准。

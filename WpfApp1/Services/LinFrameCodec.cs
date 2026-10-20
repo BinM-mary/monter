@@ -124,7 +124,7 @@ public static class LinFrameCodec
     /// <summary>
     /// 构造 3C 诊断请求（55 AA 55 3C 08 + 8 字节 PDU + CS，共 14 字节）。
     /// 08 为串口接口写入标识，不参与校验；Checksum 为经典校验——只累加 8 字节 PDU，
-    /// 不以 PID 为种子，与增强型应用帧校验不同（WpfApp1诊断架构讨论记录.md §7.1）。
+    /// 不以 PID 为种子，与增强型应用帧校验不同（架构/WpfApp1诊断架构讨论记录.md §7.1）。
     /// </summary>
     public static byte[] CreateDiagnosticRequest(ReadOnlySpan<byte> pdu)
     {

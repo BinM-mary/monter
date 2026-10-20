@@ -4,22 +4,18 @@ using WpfApp1.Models;
 namespace WpfApp1.Services;
 
 /// <summary>
-/// 统一发送调度器（由 LinFramePollingService 演进而来，依据 WpfApp1诊断架构讨论记录.md §5、§11、§15）：
-/// - 应用通信：串口连接后按 100 ms 一拍发送，先写 0x15（MotorCommandService 快照）再读 0x33，
-///   发送忙则跳过该拍，不补发、不排队堆积；
-/// - 单帧边界暂停：按下诊断按键后，当前单帧串口写入完成即暂停应用发送并保存游标，
+/// 统一发送调度器（由 LinFramePollingService 演进而来，依据 架构/WpfApp1诊断架构讨论记录.md §5、§11、§15）：
+/// - 应用通信：串口连接后按 100 ms 一拍发送，拍内按 0x15（MotorCommandService 快照）→ 0x33 → 0x34
+///   的顺序发送，相邻应用帧间隔 10 ms；发送忙则跳过该拍，不补发、不排队堆积；
+/// - 单帧边界暂停：按下诊断按键后，当前单帧串口写入完成即暂停应用发送并保存序列位置，
 ///   不等待应用回复，不把应用帧插入诊断帧之间，一次事务内也不穿插应用帧；
 /// - 诊断独占：3C 由协调层经本类发送；3D 按 t0 + n×20 ms 的固定节拍发送，忙则跳过该拍；
-/// - 恢复：队列清空后从游标位置立即发送一帧，并衔接 100 ms 整拍；
+/// - 恢复：队列清空后从保存的序列位置立即续发，并衔接 100 ms 整拍；
 /// - 串口唯一发送出口：应用帧与诊断帧都不绕过本类；断线停止所有调度，重连恢复应用发送。
 /// </summary>
 public sealed class LinBusScheduler : IDisposable
 {
-    private enum AppCursor : byte
-    {
-        WriteControlFrame,
-        ReadStatusFrame
-    }
+    private readonly record struct AppFrameStep(byte Id, bool IsWrite);
 
     private enum SchedulerMode : byte
     {
@@ -31,15 +27,15 @@ public sealed class LinBusScheduler : IDisposable
     private readonly LinFrameChannel channel;
     private readonly MotorCommandService? motorCommands;
     private readonly TimeSpan appPeriod;
+    private readonly TimeSpan appInterFrameGap;
     private readonly TimeProvider timeProvider;
     private readonly object stateLock = new();
     private readonly ITimer appTimer;
     private readonly ITimer pollTimer;
-    private readonly byte[] statusReadIds;
+    private readonly AppFrameStep[] appSequence;
 
     private SchedulerMode mode = SchedulerMode.Disconnected;
-    private AppCursor cursor = AppCursor.WriteControlFrame;
-    private int statusReadIndex;
+    private int appStepIndex;
     private bool pauseRequested;
     private bool pollingActive;
     private long pollFirstTarget;
@@ -63,21 +59,43 @@ public sealed class LinBusScheduler : IDisposable
         LinFrameChannel channel,
         MotorCommandService? motorCommands = null,
         TimeSpan? appPeriod = null,
+        TimeSpan? appInterFrameGap = null,
         TimeProvider? timeProvider = null)
     {
         this.channel = channel ?? throw new ArgumentNullException(nameof(channel));
         this.motorCommands = motorCommands;
         this.appPeriod = appPeriod ?? TimeSpan.FromMilliseconds(100);
+        this.appInterFrameGap = appInterFrameGap ?? TimeSpan.FromMilliseconds(10);
         this.timeProvider = timeProvider ?? TimeProvider.System;
         if (this.appPeriod <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(appPeriod));
         }
 
-        statusReadIds = channel.Catalog.Definitions
+        if (this.appInterFrameGap < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(appInterFrameGap));
+        }
+
+        var statusReadIds = channel.Catalog.Definitions
             .Where(definition => !definition.IsDiagnostic && definition.Publisher == LinPublisher.Slave)
             .Select(definition => definition.Id)
             .ToArray();
+
+        // 应用拍序列：0x15 写入在前，随后按帧表顺序读取 0x33、0x34。
+        // 没有从节点读取帧时不启动应用拍，保持原行为。
+        var steps = new List<AppFrameStep>();
+        if (statusReadIds.Length > 0)
+        {
+            if (this.motorCommands is not null)
+            {
+                steps.Add(new AppFrameStep(MotorCommandService.FrameId, IsWrite: true));
+            }
+
+            steps.AddRange(statusReadIds.Select(id => new AppFrameStep(id, IsWrite: false)));
+        }
+
+        appSequence = steps.ToArray();
 
         appTimer = this.timeProvider.CreateTimer(
             AppTimerCallback,
@@ -289,7 +307,7 @@ public sealed class LinBusScheduler : IDisposable
         await channel.WaitForTransmitIdleAsync().ConfigureAwait(false);
     }
 
-    /// <summary>退出诊断模式并从保存的游标位置恢复应用发送，随后衔接 100 ms 整拍。</summary>
+    /// <summary>退出诊断模式并从保存的序列位置恢复应用发送，随后衔接 100 ms 整拍。</summary>
     public async Task ExitDiagnosticModeAsync()
     {
         Task? resumeSend = null;
@@ -305,8 +323,14 @@ public sealed class LinBusScheduler : IDisposable
             pollingActive = false;
             pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
 
-            if (!sendBusy && statusReadIds.Length > 0)
+            if (!sendBusy && appSequence.Length > 0)
             {
+                // 暂停在最后一帧之后：新一轮应用拍从 0x15 重新开始。
+                if (appStepIndex >= appSequence.Length)
+                {
+                    appStepIndex = 0;
+                }
+
                 sendBusy = true;
                 var generation = ++sendGeneration;
                 resumeSend = RunAppBeatAsync(generation);
@@ -326,7 +350,7 @@ public sealed class LinBusScheduler : IDisposable
             // 恢复期间若又有诊断入队，重新进入的暂停仍按单帧边界生效，此处不再启动应用定时器。
             if (!disposed && !pauseRequested && mode == SchedulerMode.AppRunning)
             {
-                appTimer.Change(appPeriod, appPeriod);
+                appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
             }
         }
     }
@@ -362,11 +386,25 @@ public sealed class LinBusScheduler : IDisposable
         Task? toStart = null;
         lock (stateLock)
         {
-            if (disposed || mode != SchedulerMode.AppRunning || pauseRequested || sendBusy)
+            if (disposed || mode != SchedulerMode.AppRunning)
             {
                 return;
             }
 
+            // 单次定时器：本拍启动后，从当前时刻起 100 ms 再尝试下一拍。
+            // 相比固定周期定时器，可避免回调延迟造成的"上一拍 85 ms、下一拍 110 ms"式相位压缩。
+            // 即使 pauseRequested 为真也继续排下一拍：独占申请被撤销时应用通信能自动恢复。
+            if (appSequence.Length > 0)
+            {
+                appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
+            }
+
+            if (pauseRequested || sendBusy)
+            {
+                return;
+            }
+
+            appStepIndex = 0;
             sendBusy = true;
             var generation = ++sendGeneration;
             toStart = RunAppBeatAsync(generation);
@@ -433,50 +471,52 @@ public sealed class LinBusScheduler : IDisposable
         {
             while (true)
             {
-                var sendControlFrame = false;
-                var readId = (byte)0;
+                AppFrameStep step;
                 lock (stateLock)
                 {
-                    if (disposed || mode != SchedulerMode.AppRunning || pauseRequested || statusReadIds.Length == 0)
+                    if (disposed || mode != SchedulerMode.AppRunning || pauseRequested
+                        || appStepIndex >= appSequence.Length)
                     {
                         return;
                     }
 
-                    sendControlFrame = cursor == AppCursor.WriteControlFrame && motorCommands is not null;
-                    readId = statusReadIds[statusReadIndex % statusReadIds.Length];
+                    step = appSequence[appStepIndex];
                 }
 
                 // 实际写入在锁外执行，避免持调度锁申请通道锁。
-                if (sendControlFrame && motorCommands is not null)
+                if (step.IsWrite)
                 {
+                    var commands = motorCommands
+                        ?? throw new InvalidOperationException("应用序列包含 0x15 写入，但未配置 MotorCommandService。");
                     await channel.SendWriteRequestAsync(
-                        MotorCommandService.FrameId,
-                        motorCommands.CreateDataSnapshot()).ConfigureAwait(false);
+                        step.Id,
+                        commands.CreateDataSnapshot()).ConfigureAwait(false);
                 }
                 else
                 {
-                    await channel.SendReadRequestAsync(readId).ConfigureAwait(false);
-                    statusReadIndex = (statusReadIndex + 1) % statusReadIds.Length;
+                    await channel.SendReadRequestAsync(step.Id).ConfigureAwait(false);
                 }
 
                 lock (stateLock)
                 {
-                    cursor = sendControlFrame
-                        ? AppCursor.ReadStatusFrame
-                        : AppCursor.WriteControlFrame;
+                    appStepIndex++;
 
-                    // 暂停请求已在单帧写完后的帧边界生效，配套应用帧不再发送。
+                    // 暂停请求已在单帧写完后的帧边界生效，后续应用帧不再发送。
                     if (disposed || mode != SchedulerMode.AppRunning || pauseRequested)
                     {
                         return;
                     }
+
+                    // 本拍序列已发完，等待下一次 100 ms 定时器触发。
+                    if (appStepIndex >= appSequence.Length)
+                    {
+                        return;
+                    }
                 }
 
-                // 写入帧的配套读取帧在同一拍内继续发送；读取帧后本拍结束（§15.3）。
-                if (!sendControlFrame)
-                {
-                    return;
-                }
+                // 相邻应用帧间隔 10 ms，从上一帧串口写入完成起算。
+                // 等待期间若收到诊断暂停请求，循环顶部会重新检查，不会多发下一帧。
+                await Task.Delay(appInterFrameGap, timeProvider).ConfigureAwait(false);
             }
         }
         catch (Exception exception)
@@ -588,10 +628,9 @@ public sealed class LinBusScheduler : IDisposable
                 mode = SchedulerMode.AppRunning;
                 pauseRequested = false;
                 pollingActive = false;
-                cursor = AppCursor.WriteControlFrame;
-                statusReadIndex = 0;
+                appStepIndex = 0;
                 pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-                appTimer.Change(appPeriod, appPeriod);
+                appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
             }
             else
             {

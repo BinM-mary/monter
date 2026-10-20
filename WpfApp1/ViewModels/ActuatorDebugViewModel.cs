@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -58,10 +59,10 @@ public partial class ActuatorDebugViewModel : ObservableObject
 
     public ObservableCollection<MotorPresetViewModel> EditablePresets { get; }
 
-    // 0x33 状态显示与 0x15 控制写入均已接入。三个设备版本读取（0x22 F1 80/F1 95/F1 93）已实现；
-    // "读取电压和温度参数"协议仍未定义，保持禁用。
+    // 0x33 状态显示、0x34 温度/电压数值与 0x15 控制写入均已接入。
+    // 三个设备版本读取（0x22 F1 80/F1 95/F1 93）已实现。
     public string ProtocolStatusText =>
-        "0x33 状态显示 + 0x15 控制写入已接入；三个设备版本读取已实现，电压温度参数待定义";
+        "0x33 状态 + 0x34 温度/电压 + 0x15 控制已接入；三个设备版本读取已实现";
 
     // 诊断进行中（含排队等待期间）禁用电机操作；暂停期间 0x33 不再刷新，显示保持最后一次有效值。
     private bool IsDiagnosticIdle => !isDiagnosticActive;
@@ -114,7 +115,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
     private string bootloaderVersionText = string.Empty;
 
     [ObservableProperty]
-    private string retreatAngleText = string.Empty;
+    private string stallRetreatStepsText = string.Empty;
 
     [ObservableProperty]
     private string firmwareVersionText = string.Empty;
@@ -165,6 +166,31 @@ public partial class ActuatorDebugViewModel : ObservableObject
     [ObservableProperty]
     private string overtemperatureFaultColor = StatusIdleColor;
 
+    // 0x33 新增状态：初始化、开路、短路与马达故障汇总。
+    [ObservableProperty]
+    private string initializationStatusText = "—";
+
+    [ObservableProperty]
+    private string initializationStatusColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string openCircuitFaultText = "—";
+
+    [ObservableProperty]
+    private string openCircuitFaultColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string shortCircuitFaultText = "—";
+
+    [ObservableProperty]
+    private string shortCircuitFaultColor = StatusIdleColor;
+
+    [ObservableProperty]
+    private string motorFaultText = "—";
+
+    [ObservableProperty]
+    private string motorFaultColor = StatusIdleColor;
+
     [ObservableProperty]
     private string title = "执行器调试";
 
@@ -180,8 +206,8 @@ public partial class ActuatorDebugViewModel : ObservableObject
         StatusText = $"你好，{UserName}";
     }
 
-    // 三个版本读取：串口已连接即可入队（诊断排队期间仍可继续提交）；
-    // 电压/温度参数协议未定义，保持禁用。读取结果为版本文本或界面提示，失败不清空已有显示。
+    // 三个版本读取：串口已连接即可入队（诊断排队期间仍可继续提交）。
+    // 温度/电压已改由 0x34 周期读取，不再通过诊断按钮触发。
     private bool CanReadDeviceInfo(string? operationName)
     {
         return SerialSettings.IsConnected && TryMapVersionKind(operationName, out _);
@@ -293,7 +319,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
         CurrentPositionSteps = 0;
         InitializationStepsText = string.Empty;
         BootloaderVersionText = string.Empty;
-        RetreatAngleText = string.Empty;
+        StallRetreatStepsText = string.Empty;
         FirmwareVersionText = string.Empty;
         HardwareVersionText = string.Empty;
         CurrentVoltageText = string.Empty;
@@ -317,11 +343,29 @@ public partial class ActuatorDebugViewModel : ObservableObject
         NegativeLimitSteps = status.NegativeLimitSteps;
         TotalTravelSteps = Math.Max(status.PositiveLimitSteps, status.NegativeLimitSteps);
 
+        switch (status.InitializationState)
+        {
+            case MotorInitializationState.Completed:
+                InitializationStatusText = "完成";
+                InitializationStatusColor = StatusNormalColor;
+                break;
+            case MotorInitializationState.InProgress:
+                InitializationStatusText = "初始化中";
+                InitializationStatusColor = StatusMovingColor;
+                break;
+            case MotorInitializationState.Error:
+                InitializationStatusText = "错误";
+                InitializationStatusColor = StatusFaultColor;
+                break;
+            default:
+                InitializationStatusText = "未定义";
+                InitializationStatusColor = StatusIdleColor;
+                break;
+        }
+
         switch (status.MotionState)
         {
             case MotorMotionState.Stopped:
-            case MotorMotionState.Stalled:
-                // 堵转期间电机处于停止；堵转本身在"堵转故障"行单独显示。
                 MotionStatusText = "停止";
                 MotionStatusColor = StatusNormalColor;
                 break;
@@ -329,8 +373,20 @@ public partial class ActuatorDebugViewModel : ObservableObject
                 MotionStatusText = "运动中";
                 MotionStatusColor = StatusMovingColor;
                 break;
+            case MotorMotionState.Stalled:
+                MotionStatusText = "堵转";
+                MotionStatusColor = StatusFaultColor;
+                break;
+            case MotorMotionState.OpenCircuit:
+                MotionStatusText = "开路";
+                MotionStatusColor = StatusFaultColor;
+                break;
+            case MotorMotionState.ShortCircuit:
+                MotionStatusText = "短路";
+                MotionStatusColor = StatusFaultColor;
+                break;
             default:
-                MotionStatusText = "保留（0x3）";
+                MotionStatusText = $"保留（0x{(int)status.MotionState:X}）";
                 MotionStatusColor = StatusIdleColor;
                 break;
         }
@@ -345,6 +401,37 @@ public partial class ActuatorDebugViewModel : ObservableObject
             StallFaultText = "正常";
             StallFaultColor = StatusNormalColor;
         }
+
+        if (status.MotionState == MotorMotionState.OpenCircuit)
+        {
+            OpenCircuitFaultText = "开路";
+            OpenCircuitFaultColor = StatusFaultColor;
+        }
+        else
+        {
+            OpenCircuitFaultText = "正常";
+            OpenCircuitFaultColor = StatusNormalColor;
+        }
+
+        if (status.MotionState == MotorMotionState.ShortCircuit)
+        {
+            ShortCircuitFaultText = "短路";
+            ShortCircuitFaultColor = StatusFaultColor;
+        }
+        else
+        {
+            ShortCircuitFaultText = "正常";
+            ShortCircuitFaultColor = StatusNormalColor;
+        }
+
+        var hasMotorFault = status.MotionState is MotorMotionState.Stalled
+            or MotorMotionState.OpenCircuit
+            or MotorMotionState.ShortCircuit;
+        MotorFaultText = hasMotorFault ? "故障" : "正常";
+        MotorFaultColor = hasMotorFault ? StatusFaultColor : StatusNormalColor;
+
+        // 字节 7：堵转回退步数，单位 step。
+        StallRetreatStepsText = $"{status.StallRetreatSteps} step";
 
         if (status.VoltageState == MotorVoltageState.Low)
         {
@@ -380,12 +467,40 @@ public partial class ActuatorDebugViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 应用一次 0x34 回复解析结果（须在 UI 线程调用）。
+    /// 非有限值（NaN/Infinity）视为无效读取，保留上一次有效显示。
+    /// 温度、电压的单位由设备侧约定，界面只显示数值，不附加倍率或单位。
+    /// </summary>
+    public void ApplyMotorMeasurements(MotorMeasurementSnapshot measurement)
+    {
+        ArgumentNullException.ThrowIfNull(measurement);
+
+        if (float.IsFinite(measurement.Temperature))
+        {
+            CurrentTemperatureText = measurement.Temperature.ToString("0.00", CultureInfo.InvariantCulture);
+        }
+
+        if (float.IsFinite(measurement.Voltage))
+        {
+            CurrentVoltageText = measurement.Voltage.ToString("0.00", CultureInfo.InvariantCulture);
+        }
+    }
+
     private void ClearMotorStatusDisplay()
     {
         NegativeLimitSteps = 0;
         TotalTravelSteps = DefaultTotalTravelSteps;
+        InitializationStatusText = "—";
+        InitializationStatusColor = StatusIdleColor;
         MotionStatusText = "—";
         MotionStatusColor = StatusIdleColor;
+        OpenCircuitFaultText = "—";
+        OpenCircuitFaultColor = StatusIdleColor;
+        ShortCircuitFaultText = "—";
+        ShortCircuitFaultColor = StatusIdleColor;
+        MotorFaultText = "—";
+        MotorFaultColor = StatusIdleColor;
         StallFaultText = "—";
         StallFaultColor = StatusIdleColor;
         UndervoltageFaultText = "—";

@@ -1,6 +1,6 @@
 namespace WpfApp1.Models;
 
-/// <summary>三个设备信息读取业务（WpfApp1诊断架构讨论记录.md §2）。</summary>
+/// <summary>三个设备信息读取业务（架构/WpfApp1诊断架构讨论记录.md §2）。</summary>
 public enum DeviceVersionKind
 {
     Bootloader,

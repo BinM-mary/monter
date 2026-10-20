@@ -4,7 +4,7 @@ namespace WpfApp1.Services;
 
 /// <summary>
 /// ID 0x33 读取应用帧回复（8 字节 DATA）的信号提取。
-/// 信号布局见 PROTOCOL.md §4.3；保留位不参与业务判断。
+/// 信号布局见 协议/PROTOCOL.md §4.3；保留位不参与业务判断。
 /// </summary>
 public static class MotorStatusFrameParser
 {
@@ -20,14 +20,17 @@ public static class MotorStatusFrameParser
         var positiveLimit = (ushort)(data[2] | (data[3] << 8));
         var negativeLimit = (ushort)(data[4] | (data[5] << 8));
 
-        // 字节 6：bit0-1 运动状态，bit2-3 电压状态，bit4 温度状态；其余位保留。
+        // 字节 6：bit0-2 运动状态（3 bit），bit3-4 电压状态（2 bit），
+        // bit5 温度状态（1 bit），bit6-7 初始化状态（2 bit）。
         var flags = data[6];
         return new MotorStatusSnapshot(
             current,
             positiveLimit,
             negativeLimit,
-            (MotorMotionState)(flags & 0x3),
-            (MotorVoltageState)((flags >> 2) & 0x3),
-            ((flags >> 4) & 0x1) != 0);
+            (MotorMotionState)(flags & 0x07),
+            (MotorVoltageState)((flags >> 3) & 0x03),
+            ((flags >> 5) & 0x01) != 0,
+            (MotorInitializationState)((flags >> 6) & 0x03),
+            data[7]);
     }
 }

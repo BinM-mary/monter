@@ -4,9 +4,35 @@
 >
 > 2026-10-18 诊断第一阶段：按 `WpfApp1诊断架构讨论记录.md` 实现三个设备版本读取（22 F1 80 / F1 95 / F1 93，NAD 0x78），调度采用“暂停应用通信”模式；详见本文 2026-10-18 条目。
 >
-> 2026-10-15 文档整理：协议文档合并为 [PROTOCOL.md](PROTOCOL.md)（原 `LIN_APPLICATION_READ.md`、`LIN_APPLICATION_WRITE.md` 已并入）；早期 `AA 55 / CMD / SUB_CMD / LEN / XOR` 旧协议时期的详细记录已压缩为摘要，Git 历史可查完整内容。
+> 2026-10-15 文档整理：协议文档合并为 [PROTOCOL.md](../协议/PROTOCOL.md)（原 `LIN_APPLICATION_READ.md`、`LIN_APPLICATION_WRITE.md` 已并入）；早期 `AA 55 / CMD / SUB_CMD / LEN / XOR` 旧协议时期的详细记录已压缩为摘要，Git 历史可查完整内容。
 
 ## 2026-10-20
+
+### 应用帧三帧序列、`0x33` 新位布局与 `0x34` 接入
+
+**协议与解析**
+
+- `0x33` 按新定义重排字节 6：bit0-2 运动状态（5 种：停止/运动/堵转/开路/短路），bit3-4 电压状态，bit5 温度状态，bit6-7 初始化状态；字节 7 改为堵转回退步数（8 bit）。
+- `MotorStatusSnapshot` 增加 `InitializationState`、`StallRetreatSteps`，`MotorMotionState` 增加 `OpenCircuit`/`ShortCircuit`；`MotorStatusFrameParser` 按新位域提取。
+- 新增 `MotorMeasurementFrameParser`：`0x34` 前 4 字节温度、后 4 字节电压，按小端 IEEE 754 binary32 读取；新增 `MotorMeasurementSnapshot`。
+
+**调度**
+
+- `LinBusScheduler` 由两位置游标改为“帧序列 + 索引”`appSequence`，当前序列 `0x15 → 0x33 → 0x34`；诊断暂停保存索引，恢复时按索引续发。
+- 应用拍保持 100 ms；拍内相邻帧增加 10 ms 间隔（从上一帧串口写入完成起算），`0x15` 到下一拍 `0x15` 仍为 100 ms。
+- 应用定时器改为单次重排（每次触发后从当前时刻排 100 ms），避免固定周期定时器回调延迟造成的相位压缩；忙则整拍跳过。
+
+**界面**
+
+- 帧表登记 `0x34`，`HandleStatusFrameReceived` 增加 `0x34` 分支；温度/电压按两位小数显示，非有限值保留上次有效值。
+- “初始化状态”“开路故障”“短路故障”“马达故障”“堵转回退步数”由 `0x33` 驱动，替换原来的静态占位；“退步度数”标签改为“堵转回退步数”。
+
+**验证与说明**
+
+- `dotnet build` 0 警告 0 错误；临时控制台用例验证了 `0x33` 位域、`0x34` 小端 float、三帧顺序与 10 ms/100 ms 时序。
+- Windows 定时器分辨率约 15.6 ms，10 ms 间隔实测可能为 10～16 ms；当前保证“不小于 10 ms”。
+- 需求示例中的 `0x35` 未提供布局，本轮按 `0x34` 实现；若确需 `0x35`，补充帧定义后会自动进入读取序列。
+- 浮点字节序、单位、换算与 `0x15` 重复快照的设备端幂等性仍需实机核对。
 
 ### 发布复核：诊断释放竞态仍待处理
 
