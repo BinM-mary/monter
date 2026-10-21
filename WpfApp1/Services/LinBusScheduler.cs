@@ -7,8 +7,10 @@ namespace WpfApp1.Services;
 /// 统一发送调度器（由 LinFramePollingService 演进而来，依据 架构/WpfApp1诊断架构讨论记录.md §5、§11、§15）：
 /// - 应用通信：串口连接后按 100 ms 一拍发送，拍内按 0x15（MotorCommandService 快照）→ 0x33 → 0x34
 ///   的顺序发送，相邻应用帧间隔 10 ms；发送忙则跳过该拍，不补发、不排队堆积；
-/// - 单帧边界暂停：按下诊断按键后，当前单帧串口写入完成即暂停应用发送并保存序列位置，
-///   不等待应用回复，不把应用帧插入诊断帧之间，一次事务内也不穿插应用帧；
+/// - 单帧边界暂停：按下诊断按键后立即停止启动后续应用帧，当前正在写的单帧照常写完并保存序列位置；
+/// - 诊断前应用回复收尾：按 ID 登记待回复标志，从触发时刻起最多等 100 ms；标志全清即提前放行，
+///   到期强制全清后放行；放行前仍等已开始的那一笔写入完成，完成后不再追加等待；
+/// - 不把应用帧插入诊断帧之间，一次事务内也不穿插应用帧；
 /// - 诊断独占：3C 由协调层经本类发送；3D 按 t0 + n×20 ms 的固定节拍发送，忙则跳过该拍；
 /// - 恢复：队列清空后从保存的序列位置立即续发，并衔接 100 ms 整拍；
 /// - 串口唯一发送出口：应用帧与诊断帧都不绕过本类；断线停止所有调度，重连恢复应用发送。
@@ -33,6 +35,22 @@ public sealed class LinBusScheduler : IDisposable
     private readonly ITimer appTimer;
     private readonly ITimer pollTimer;
     private readonly AppFrameStep[] appSequence;
+
+    /// <summary>诊断前应用回复收尾窗口：从触发诊断时刻起算的最长等待，默认 100 ms。</summary>
+    private readonly TimeSpan appReplyDrainWindow;
+
+    /// <summary>
+    /// 应用待回复登记：按帧 ID 合并的状态，不是逐请求计数器（诊断讨论记录 §19.2）。
+    /// 发送前登记，收到完整且校验通过的对应 ID 回复时清除；部分字节与错误候选不清除。
+    /// </summary>
+    private readonly HashSet<byte> pendingAppReplyIds = [];
+
+    /// <summary>
+    /// 收尾等待信号：登记清空时唤醒等待方，等待结束即置空。
+    /// 必须带 <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>，
+    /// 否则在锁内 TrySetResult 会同步执行续体，与接收线程的调用栈交叉成环。
+    /// </summary>
+    private TaskCompletionSource? appReplyDrainSignal;
 
     private SchedulerMode mode = SchedulerMode.Disconnected;
     private int appStepIndex;
@@ -60,12 +78,14 @@ public sealed class LinBusScheduler : IDisposable
         MotorCommandService? motorCommands = null,
         TimeSpan? appPeriod = null,
         TimeSpan? appInterFrameGap = null,
+        TimeSpan? appReplyDrainWindow = null,
         TimeProvider? timeProvider = null)
     {
         this.channel = channel ?? throw new ArgumentNullException(nameof(channel));
         this.motorCommands = motorCommands;
         this.appPeriod = appPeriod ?? TimeSpan.FromMilliseconds(100);
         this.appInterFrameGap = appInterFrameGap ?? TimeSpan.FromMilliseconds(10);
+        this.appReplyDrainWindow = appReplyDrainWindow ?? TimeSpan.FromMilliseconds(100);
         this.timeProvider = timeProvider ?? TimeProvider.System;
         if (this.appPeriod <= TimeSpan.Zero)
         {
@@ -75,6 +95,11 @@ public sealed class LinBusScheduler : IDisposable
         if (this.appInterFrameGap < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(appInterFrameGap));
+        }
+
+        if (this.appReplyDrainWindow < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(appReplyDrainWindow));
         }
 
         var statusReadIds = channel.Catalog.Definitions
@@ -108,6 +133,8 @@ public sealed class LinBusScheduler : IDisposable
             Timeout.InfiniteTimeSpan,
             Timeout.InfiniteTimeSpan);
         channel.ConnectionStateChanged += HandleConnectionStateChanged;
+        // 应用回复到达即清对应 ID 的待回复登记；诊断候选走 DiagnosticPacketReceived，不进入此处。
+        channel.FrameReceived += HandleAppFrameReceived;
     }
 
     public bool IsConnected
@@ -137,15 +164,24 @@ public sealed class LinBusScheduler : IDisposable
     public event Action<object?>? DiagnosticReadAttemptFailed;
 
     /// <summary>
-    /// 申请暂停应用发送并进入诊断独占：等待当前单帧串口写入完成，不等待应用回复。
-    /// 已处于诊断独占时立即返回；串口未连接时抛出，由协调层结束业务。
+    /// 申请暂停应用发送并进入诊断独占：先按单帧边界停止启动后续应用帧，
+    /// 再从触发时刻起最多等待 <see cref="appReplyDrainWindow"/> 让已发出应用帧的回复收尾，
+    /// 最后等待正在写的单帧串口写入完成。已处于诊断独占时立即返回；串口未连接时抛出，由协调层结束业务。
     /// 申请绑定代次：被 <see cref="CancelPendingEnterRequest"/> 撤销或被更新批次取代后，
     /// 迟到的完成不得再切换模式（F4 §5.2）。
     /// </summary>
     public async Task EnterDiagnosticModeAsync()
     {
+        // t_req：有效诊断操作触发并发起应用暂停申请的时刻，收尾截止固定为 t_req + 窗口长度。
+        // 不随后续写入完成、回复到达或新字节刷新，避免把“最多等 100 ms”变成“至少等 100 ms”。
+        var requestTimestamp = timeProvider.GetTimestamp();
+
         Task? runningSend;
         long requestGeneration;
+        Task? drainSignalTask = null;
+        TimeSpan drainRemaining = TimeSpan.Zero;
+        bool replyDrainPending = false;
+
         lock (stateLock)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
@@ -162,9 +198,37 @@ public sealed class LinBusScheduler : IDisposable
             requestGeneration = ++enterRequestGeneration;
             pauseRequested = true;
             runningSend = activeSendTask;
+
+            if (pendingAppReplyIds.Count > 0)
+            {
+                replyDrainPending = true;
+
+                // 扣除从 t_req 到进入临界区的消耗，使截止保持为绝对时刻。
+                drainRemaining = appReplyDrainWindow - timeProvider.GetElapsedTime(requestTimestamp);
+                if (drainRemaining > TimeSpan.Zero)
+                {
+                    var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    appReplyDrainSignal = signal;
+                    drainSignalTask = signal.Task;
+                }
+            }
         }
 
-        // 暂停边界为单帧：正在写的应用帧写完即停，配套应用帧不再发送。
+        if (replyDrainPending)
+        {
+            // 与登记清空竞速：全部清除即提前放行，到期则放弃等待。
+            var drainStartTimestamp = timeProvider.GetTimestamp();
+            if (drainSignalTask is not null)
+            {
+                await Task
+                    .WhenAny(drainSignalTask, Task.Delay(drainRemaining, timeProvider))
+                    .ConfigureAwait(false);
+            }
+
+            FinishReplyDrain(drainStartTimestamp);
+        }
+
+        // 不打断已开始的应用帧写入：写入跨过收尾截止时，写完即放行，不追加第二轮等待。
         if (runningSend is not null)
         {
             await WaitSafeAsync(runningSend).ConfigureAwait(false);
@@ -193,6 +257,27 @@ public sealed class LinBusScheduler : IDisposable
     }
 
     /// <summary>
+    /// 结束应用回复收尾等待：无论提前清空还是到期，都清空全部登记（提前清空时本就为空，幂等），
+    /// 并记录等待结果，供实机复测判断收尾窗口是否真正生效。
+    /// </summary>
+    private void FinishReplyDrain(long drainStartTimestamp)
+    {
+        int forced;
+        TimeSpan waited;
+        lock (stateLock)
+        {
+            forced = pendingAppReplyIds.Count;
+            waited = timeProvider.GetElapsedTime(drainStartTimestamp);
+            ClearAllPendingRepliesLocked();
+        }
+
+        // 只在锁外写日志：诊断切换频率很低，但仍然不把 I/O 放在调度锁内。
+        Debug.WriteLine(forced > 0
+            ? $"应用回复收尾：等待 {waited.TotalMilliseconds:F0} ms 到期，强制清除 {forced} 个待回复标志"
+            : $"应用回复收尾：等待 {waited.TotalMilliseconds:F0} ms 后标志全部清空");
+    }
+
+    /// <summary>
     /// 撤销尚未完成的独占申请：提升代次并清除暂停意图。
     /// 只应在协调层确认已无有效等待者时调用（F4 §5.2 第 6 条）；
     /// 该撤销只影响独占意图，不撤回已开始的应用帧写入。
@@ -206,6 +291,10 @@ public sealed class LinBusScheduler : IDisposable
             {
                 pauseRequested = false;
             }
+
+            // 撤销即放弃本轮收尾等待：不清登记与信号的话，撤销要拖满整个窗口才生效，
+            // 会把紧跟其后的新一批诊断进入一并推迟。
+            ClearAllPendingRepliesLocked();
         }
     }
 
@@ -323,6 +412,9 @@ public sealed class LinBusScheduler : IDisposable
             pollingActive = false;
             pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
 
+            // 兜底：进入诊断时已清空，此处防止异常路径把旧登记带到下一轮切换。
+            ClearAllPendingRepliesLocked();
+
             if (!sendBusy && appSequence.Length > 0)
             {
                 // 暂停在最后一帧之后：新一轮应用拍从 0x15 重新开始。
@@ -370,11 +462,14 @@ public sealed class LinBusScheduler : IDisposable
             pollingActive = false;
             sendBusy = false;
             activeSendTask = null;
+            // 释放等待方，避免 Dispose 期间仍有任务挂在收尾窗口上。
+            ClearAllPendingRepliesLocked();
             appTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
 
         channel.ConnectionStateChanged -= HandleConnectionStateChanged;
+        channel.FrameReceived -= HandleAppFrameReceived;
         appTimer.Dispose();
         pollTimer.Dispose();
     }
@@ -481,20 +576,37 @@ public sealed class LinBusScheduler : IDisposable
                     }
 
                     step = appSequence[appStepIndex];
+
+                    // 登记必须早于实际发送：设备回复可能在 Send 返回之前就已到达解析器，
+                    // 若在发送之后登记会漏掉这次快速回复，白等到窗口到期。
+                    pendingAppReplyIds.Add(step.Id);
                 }
 
                 // 实际写入在锁外执行，避免持调度锁申请通道锁。
-                if (step.IsWrite)
+                try
                 {
-                    var commands = motorCommands
-                        ?? throw new InvalidOperationException("应用序列包含 0x15 写入，但未配置 MotorCommandService。");
-                    await channel.SendWriteRequestAsync(
-                        step.Id,
-                        commands.CreateDataSnapshot()).ConfigureAwait(false);
+                    if (step.IsWrite)
+                    {
+                        var commands = motorCommands
+                            ?? throw new InvalidOperationException("应用序列包含 0x15 写入，但未配置 MotorCommandService。");
+                        await channel.SendWriteRequestAsync(
+                            step.Id,
+                            commands.CreateDataSnapshot()).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await channel.SendReadRequestAsync(step.Id).ConfigureAwait(false);
+                    }
                 }
-                else
+                catch
                 {
-                    await channel.SendReadRequestAsync(step.Id).ConfigureAwait(false);
+                    // 未发出即失败：撤回本帧登记，避免把一次失败的发送当成在途拖满收尾窗口。
+                    lock (stateLock)
+                    {
+                        RemovePendingReplyLocked(step.Id);
+                    }
+
+                    throw;
                 }
 
                 lock (stateLock)
@@ -614,6 +726,54 @@ public sealed class LinBusScheduler : IDisposable
         }
     }
 
+    /// <summary>
+    /// 应用回复到达（完整帧 + 校验通过 + ID 反算匹配，由 LinReadReplyParser 保证）：
+    /// 只清除待回复登记，不表示电机动作已执行成功。
+    /// 运行在接收线程，只做登记清除与信号释放，不得阻塞或 await。
+    /// </summary>
+    private void HandleAppFrameReceived(LinFrame frame)
+    {
+        lock (stateLock)
+        {
+            if (pendingAppReplyIds.Remove(frame.Id))
+            {
+                CompleteDrainSignalIfDrainedLocked();
+            }
+        }
+    }
+
+    private void RemovePendingReplyLocked(byte id)
+    {
+        if (pendingAppReplyIds.Remove(id))
+        {
+            CompleteDrainSignalIfDrainedLocked();
+        }
+    }
+
+    /// <summary>登记全部清空时提前放行收尾等待（须在调度锁内调用）。</summary>
+    private void CompleteDrainSignalIfDrainedLocked()
+    {
+        if (pendingAppReplyIds.Count > 0)
+        {
+            return;
+        }
+
+        // RunContinuationsAsynchronously：在锁内 TrySetResult 也不会同步执行续体。
+        appReplyDrainSignal?.TrySetResult();
+        appReplyDrainSignal = null;
+    }
+
+    /// <summary>
+    /// 强制清空全部登记并释放等待：收尾到期、撤销申请、断线与释放统一走此处
+    /// （须在调度锁内调用）。清登记不等于清串口或解析器缓存。
+    /// </summary>
+    private void ClearAllPendingRepliesLocked()
+    {
+        pendingAppReplyIds.Clear();
+        appReplyDrainSignal?.TrySetResult();
+        appReplyDrainSignal = null;
+    }
+
     private void HandleConnectionStateChanged(bool connected)
     {
         lock (stateLock)
@@ -629,6 +789,8 @@ public sealed class LinBusScheduler : IDisposable
                 pauseRequested = false;
                 pollingActive = false;
                 appStepIndex = 0;
+                // 新连接不继承旧连接的待回复登记。
+                ClearAllPendingRepliesLocked();
                 pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
             }
@@ -642,6 +804,8 @@ public sealed class LinBusScheduler : IDisposable
                 sendGeneration++;
                 sendBusy = false;
                 activeSendTask = null;
+                // 旧连接上的应用回复不会再到达，清空登记并释放收尾等待。
+                ClearAllPendingRepliesLocked();
                 appTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             }

@@ -1,7 +1,7 @@
 # WpfApp1（Holychip Motor Studio）架构文档
 
 - 文档日期：2026-10-20
-- 2026-10-21 文档补充：记录诊断前“应用待回复标志 + 从触发起最多等待 100 ms”的确认方案，尚未接入运行代码，见第 6.2 节及诊断架构讨论记录第 19 节。
+- 2026-10-21 文档补充：诊断前“应用待回复标志 + 从触发起最多等待 100 ms”的收尾策略已接入 `LinBusScheduler`，见第 6.2 节及诊断架构讨论记录第 19 节。
 - 适用代码：`main` 分支，提交 `18f67a1`（`feat: support LIN 0x3C multi-frame diagnostics`）及其后工作区状态
 - 文档性质：对**现有代码**的静态梳理与评价，不含未实现功能的承诺
 - 依据材料：源代码全文、`../协议/PROTOCOL.md`、`../版本/CHANGELOG.md`、`../版本/VERSION_HISTORY.md`、`WpfApp1诊断架构讨论记录.md`、`../修复/` 目录三份设计与修复文档、`../入门/WPF_MahApps_MVVM_基础框架搭建.md`
@@ -359,7 +359,7 @@ Append(bytes)
 5. 定时器在 100 ms 后触发下一拍，10 ms 帧间隔不改变 100 ms 拍周期。
 
 **诊断独占**：
-- `EnterDiagnosticModeAsync()`：置 `pauseRequested`，只等**当前单帧**写完（不等应用回复），然后切 `DiagnosticExclusive`、停两个定时器；申请带 `enterRequestGeneration` 代次，被撤销/被更新批次取代后迟到完成不再切模式。
+- `EnterDiagnosticModeAsync()`：置 `pauseRequested` 停止启动后续应用帧，按 `appReplyDrainWindow`（默认 100 ms）等待已发出应用帧的待回复登记清除，再等**当前单帧**写完，然后切 `DiagnosticExclusive`、停两个定时器；申请带 `enterRequestGeneration` 代次，被撤销/被更新批次取代后迟到完成不再切模式。
 - `SendDiagnosticRequestAsync(pdu)`：先占 `sendBusy` 再启任务（避免同步完成导致出口永久占用，F2 缺陷修复），返回 `FrameWriteReceipt`。
 - `StartResponsePolling(anchor, firstDelay, period, deadline, ownerToken)`：按 `anchor + n×period` 的**绝对节拍**调度；错过就跳过（`ScheduleNextPollLocked` 用 while 前移 `pollBeatIndex`），不补发。
 - `StopResponsePolling()`：只禁止新的 3D 提交。
@@ -702,13 +702,13 @@ ExecuteAsync（UdsRequest 长度 > 6，必须显式提供 MultiFrameOptions）
 暂停在 0x33 之后：恢复 → 立即 0x34 → 100 ms 后下一拍
 暂停在 0x34 之后：恢复 → 立即新一拍 0x15 →（10 ms）→ 0x33 →（10 ms）→ 0x34
 ```
-- 只等当前单帧写完，不等应用回复；
+- 只等当前单帧写完，不等整拍；已发出应用帧的回复收尾由下一段的 100 ms 窗口处理；
 - 不补发暂停期间漏掉的周期；
 - 队列未清空就**不恢复**应用发送（多笔诊断之间不插应用帧）。
 
-**2026-10-21 确认的待实现补充：应用回复收尾。** 用户反馈应用回复接收中进入诊断会导致首个 3C 无回显；现有代码只等待发送任务结束，没有对应应用回复等待。拟按 0x15/0x33/0x34 维护待回复标志：应用发送时置位，有效对应 ID 回复清位；触发诊断立即暂停后续应用发送，从该触发时刻起最多等 100 ms。无标志或提前全清即放行；到期仍有标志则全部清除并放行。首个 3C 仍须等已开始的应用写入完成；若写入跨过截止，写完后不追加等待。
+**2026-10-21 已实现：应用回复收尾。** 用户反馈应用回复接收中进入诊断会导致首个 3C 无回显；仅等发送任务结束不覆盖对应应用回复的接收。现按 0x15/0x33/0x34 维护待回复标志：`RunAppBeatAsync` 在发送前（同一临界区内）登记，`LinReadReplyParser` 校验通过并分发 `FrameReceived` 时清除；触发诊断立即暂停后续应用发送，并从触发时刻起最多等 100 ms。无标志或提前全清即放行；到期仍有标志则全部清除后放行。首个 3C 仍须等已开始的应用写入完成；若写入跨过截止，写完后不追加等待。
 
-该方案未改变正常 100 ms 应用拍、10 ms 帧间隔、50 ms 残帧字节间超时或现有诊断预算；等待期间接收继续运行。到期清标志不等同于清缓存，异常残包/晚到数据和同 ID 重复在途的处理仍需在编码时核对。完整决策与验证边界见[诊断架构讨论记录第 19 节](WpfApp1诊断架构讨论记录.md)。本段是待实现设计，不能据此声称当前已避免该切换冲突。
+放行时刻为 `max(写入完成, min(标志清空, t_req + 100 ms))`，因此 3C 可能晚于 100 ms（等那笔写入收尾），但不会从写入完成时重新计时。窗口长度由构造参数 `appReplyDrainWindow` 控制（默认 100 ms）。该方案未改变正常 100 ms 应用拍、10 ms 帧间隔、50 ms 残帧字节间超时或现有诊断预算；等待期间接收继续运行。到期清标志不等同于清缓存，异常残包/晚到数据和同 ID 重复在途的处理仍是已知边界。完整决策与验证边界见[诊断架构讨论记录第 19 节](WpfApp1诊断架构讨论记录.md)。
 
 ### 6.3 回显与响应同构下的归属判定
 
@@ -747,6 +747,7 @@ ExecuteAsync（UdsRequest 长度 > 6，必须显式提供 MultiFrameOptions）
 | N_Cr | 1000 ms | 有效 FF / 每个有效 CF | `ConsecutiveFrameTimeout` |
 | 检查定时器 | 10 ms | 事务开始 | `DiagnosticTransactionService.inspectTimer` |
 | 残缺帧清理 | 50 ms（字节间） | 最后一次收到字节 | `LinFrameChannel.frameAssemblyTimeout` |
+| 诊断前应用回复收尾窗口 | 100 ms（上限） | 触发诊断 t_req | `LinBusScheduler.appReplyDrainWindow` |
 | 多帧写入预算 / 回显预算 | 500 / 1000 ms | 每片提交 | `DiagnosticSendTiming` |
 | 分片最小/最大间隔 | 0 / 1000 ms | 上一片写完 | `DiagnosticSendTiming` |
 | 回显隔离 / 历史回显容忍 | 50 / 200 ms | t_last | `DiagnosticSendTiming` |
