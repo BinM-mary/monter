@@ -284,6 +284,9 @@
                         <DataTemplate DataType="{x:Type vm:ActuatorDebugViewModel}">
                             <views:ActuatorDebugView />
                         </DataTemplate>
+                        <DataTemplate DataType="{x:Type vm:FirmwareUpgradeViewModel}">
+                            <views:FirmwareUpgradeView />
+                        </DataTemplate>
                     </ContentControl.Resources>
                 </ContentControl>
             </mah:HamburgerMenu.Content>

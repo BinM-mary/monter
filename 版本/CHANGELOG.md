@@ -8,6 +8,25 @@
 
 ## 2026-10-21
 
+### 新增“固件升级”页面（侧边栏第二项）
+
+**界面**
+
+- 侧边栏新增“固件升级”入口，样式与“执行器调试”一致（`Segoe MDL2` 字形 `\uE895`），通过 `MenuItemViewModel` + `DataTemplate` 接入现有导航。
+- 新页面 `FirmwareUpgradeView.xaml`：顶部标题栏为“固件升级 / Firmware Upgrade”，右侧串口状态芯片与“串口设置”“连接设备”按钮与调试页同构。
+- 内容区域暂时留空，待升级业务（文件选择、传输、进度、校验）实现。
+
+**架构**
+
+- 新增 `ViewModels/FirmwareUpgradeViewModel.cs`（21 行）：构造注入 `SerialSettings`，与执行器调试页**共用同一实例**；串口连接由 `MainWindowViewModel` 级的 `connectionService` 持有，切换页面不重置、不断开。
+- `MainWindowViewModel` 增加 `FirmwareUpgrade` 属性与第二个菜单项；`MainWindow.xaml` 的 `ContentControl.Resources` 增加 `FirmwareUpgradeViewModel → FirmwareUpgradeView` 映射。
+- 样式沿用各视图自包含风格的既有组织方式，未抽取共享资源字典，不改动 `ActuatorDebugView`。
+
+**验证**
+
+- `dotnet build` 0 警告 0 错误；启动新编译版本确认主窗口与 XAML 加载正常，无启动异常。
+- 页面间切换与串口状态保持需人工观察确认（自动化验证未覆盖 UI 交互）。
+
 ### 应用回复进行中切换诊断：收尾策略实现
 
 - 记录用户反馈的问题：应用回复接收中触发诊断，首个 3C 打断中间件应用收发，出现无回显；原有暂停只等待当前应用写入结束。

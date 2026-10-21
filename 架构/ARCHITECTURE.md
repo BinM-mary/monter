@@ -1,7 +1,8 @@
 # WpfApp1（Holychip Motor Studio）架构文档
 
-- 文档日期：2026-10-20
+- 文档日期：2026-10-20，2026-10-21 增补
 - 2026-10-21 文档补充：诊断前“应用待回复标志 + 从触发起最多等待 100 ms”的收尾策略已接入 `LinBusScheduler`，见第 6.2 节及诊断架构讨论记录第 19 节。
+- 2026-10-21 文档补充：新增“固件升级”页面（侧边栏第二项），导航与页面结构见第 4.5.1、4.5.5 节；页面内容区暂为空，升级业务尚未实现。
 - 适用代码：`main` 分支，提交 `18f67a1`（`feat: support LIN 0x3C multi-frame diagnostics`）及其后工作区状态
 - 文档性质：对**现有代码**的静态梳理与评价，不含未实现功能的承诺
 - 依据材料：源代码全文、`../协议/PROTOCOL.md`、`../版本/CHANGELOG.md`、`../版本/VERSION_HISTORY.md`、`WpfApp1诊断架构讨论记录.md`、`../修复/` 目录三份设计与修复文档、`../入门/WPF_MahApps_MVVM_基础框架搭建.md`
@@ -43,6 +44,7 @@ WPF 上位机 ──串口(COM)──> LIN 主节点中间件 ──LIN 总线�
 | 报文输出窗口（收发报文、四维筛选、暂停、保留条数） | 已实现 | 底部状态栏 |
 | 电机预设位置本地配置（`config/motor-presets.json`） | 已实现 | 统一配置 Flyout |
 | 应用帧 `0x34` 温度/电压读取（100 ms 周期）与界面绑定 | 已实现 | 执行器调试页 |
+| 固件升级页面框架（标题栏 + 串口区，内容留空） | 已实现 | 固件升级页 |
 | UDS 负响应（`7F`）结构化解析、OTA/升级业务 | 未实现 | — |
 | 设备运行参数写入（NAD、休眠、方向等） | **界面占位，无绑定** | — |
 
@@ -74,6 +76,7 @@ WPF 上位机 ──串口(COM)──> LIN 主节点中间件 ──LIN 总线�
 │ 表现层 (Views)                                                           │
 │   MainWindow.xaml（MetroWindow + HamburgerMenu + Flyout + 状态栏）        │
 │   ActuatorDebugView.xaml（执行器调试页，UserControl）                     │
+│   FirmwareUpgradeView.xaml（固件升级页，UserControl，内容待填充）          │
 │   ProtocolLogWindow.xaml（独立报文窗口）+ 少量 code-behind（滚动/窗口）    │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 │ Binding / Command
@@ -161,6 +164,7 @@ LinBusScheduler(FrameChannel, MotorCommands, TimeProvider.System)
 DiagnosticTransactionService(FrameChannel, BusScheduler, TimeProvider.System)
 DeviceInformationService(Diagnostics)
 ActuatorDebugViewModel(SerialSettings, MotorCommands, DeviceInfo, Diagnostics)
+FirmwareUpgradeViewModel(SerialSettings)   // 与调试页共用同一 SerialSettings
 ```
 
 对象图（→ 表示持有引用）：
@@ -178,6 +182,7 @@ MainWindow
      ├─ DeviceInformationService ──> Diagnostics
      └─ ActuatorDebugViewModel ──> SerialSettings, MotorCommands, DeviceInfo, Diagnostics,
                                     MotorPresetStorageService（内部 new）
+     └─ FirmwareUpgradeViewModel ──> SerialSettings（与调试页同一实例）
 ```
 
 反向依赖只有事件订阅：
@@ -202,8 +207,8 @@ WpfApp1/
 │                             code-behind 仅处理菜单动画与报文窗口打开
 ├─ Models/                    纯数据：帧定义、诊断契约、状态快照、日志条目
 ├─ Services/                  全部业务与通信实现（本项目的主体，约 5.2k 行）
-├─ ViewModels/                4 个 VM（含 1 个日志窗口 VM）
-├─ Views/                     ActuatorDebugView(UserControl)、ProtocolLogWindow(Window)
+├─ ViewModels/                7 个 VM 文件（2 个页面 VM、菜单项/预设项、日志窗口 VM 等）
+├─ Views/                     ActuatorDebugView、FirmwareUpgradeView(UserControl)、ProtocolLogWindow(Window)
 ├─ Controls/                  HamburgerMenuItemTemplateSelector（当前未被 XAML 引用）
 └─ Resources/                 app.ico、logo-transparent.png
 ```
@@ -213,22 +218,24 @@ WpfApp1/
 | 文件 | 行数 | 角色 |
 | --- | ---: | --- |
 | `Services/DiagnosticTransactionService.cs` | 2220 | 诊断事务协调层（最复杂，改动风险最高） |
-| `Services/LinBusScheduler.cs` | 673 | 统一发送调度器 |
+| `Services/LinBusScheduler.cs` | 837 | 统一发送调度器（含诊断前应用回复收尾） |
 | `ViewModels/ProtocolLogWindowViewModel.cs` | 620 | 报文窗口筛选/暂停/镜像集合 |
 | `ViewModels/ActuatorDebugViewModel.cs` | 732 | 执行器调试页全部交互 |
 | `Services/SerialPortConnectionService.cs` | 509 | 串口连接 + 双队列 |
 | `Services/LinTransportProtocol.cs` | 362 | LIN-TP 编解码与重组状态机 |
-| `ViewModels/SerialSettingsViewModel.cs` | 339 | 串口设置与端口监测 |
-| `MainWindow.xaml` | 326 | 主窗口布局与样式 |
+| `ViewModels/SerialSettingsViewModel.cs` | 339 | 串口设置与端口监测（两页共用） |
+| `MainWindow.xaml` | 329 | 主窗口布局与样式 |
 | `Services/LinFrameChannel.cs` | 309 | 帧通道 |
 | `Models/Diagnostics.cs` | 289 | 诊断请求/结果/进度/枚举 |
-| `Views/ActuatorDebugView.xaml` | 256 | 调试页布局（大量内联样式） |
+| `Views/ActuatorDebugView.xaml` | 271 | 调试页布局（大量内联样式） |
 | `Services/LinReadReplyParser.cs` | 253 | 共享接收解析 |
 | `Services/LinFrameCodec.cs` | 241 | 构帧与校验算法 |
 | `Models/CommunicationLogEntry.cs` | 229 | 报文记录的显示语义（4 种串口形态判别） |
 | `Services/CommunicationLogService.cs` | 224 | 日志汇集与 UI 批处理 |
 | `Views/ProtocolLogWindow.xaml(.cs)` | 179 + 200 | 报文窗口 + 滚动跟随 code-behind |
-| `ViewModels/MainWindowViewModel.cs` | 116 | 组合根、导航、0x33 分发 |
+| `ViewModels/MainWindowViewModel.cs` | 133 | 组合根、导航、0x33/0x34 分发 |
+| `Views/FirmwareUpgradeView.xaml` | 54 | 固件升级页框架（内容区待填充） |
+| `ViewModels/FirmwareUpgradeViewModel.cs` | 21 | 固件升级页（当前仅持有串口设置） |
 | `Services/MotorPresetStorageService.cs` | 109 | 预设 JSON 读写 |
 | `Services/DeviceInformationService.cs` | 103 | 版本读取业务 |
 | `MainWindow.xaml.cs` | 94 | 主窗口 code-behind |
@@ -494,7 +501,8 @@ Append(bytes)
 #### 4.5.1 `MainWindow` + `MainWindowViewModel`
 
 - 外壳：`MetroWindow`（最大化），左侧 `HamburgerMenu`（展开/收起带 280 ms 动画，`IsNavigationExpanded` 驱动文字可见性），两个 `Flyout`（串口设置 / 统一配置），底部状态栏（连接指示、端口、报文窗口入口、静态占位文字）。
-- 导航：`MenuItemViewModel{Label, Glyph, ViewModel}` → `SelectedMenuItem` → `CurrentViewModel` → `ContentControl` 用 `DataTemplate` 映射到 `ActuatorDebugView`。目前**只有一个菜单项**。
+- 导航：`MenuItemViewModel{Label, Glyph, ViewModel}` → `SelectedMenuItem` → `CurrentViewModel` → `ContentControl` 用 `DataTemplate` 映射到页面 View。当前两个菜单项：`执行器调试`（`\uE713`）→ `ActuatorDebugView`、`固件升级`（`\uE895`）→ `FirmwareUpgradeView`。
+- 页面切换只换 `ContentControl.Content`，VM 与通信服务都是常驻实例：**串口连接、应用帧调度、诊断独占不因切页而重置或停止**。新增页面只需再加一个 `MenuItemViewModel` 与一条 `DataTemplate`。
 - `HandleStatusFrameReceived`：按 ID 分发 `0x33` / `0x34` → 解析 → `Dispatcher.BeginInvoke` 回 UI → `ApplyMotorStatus` / `ApplyMotorMeasurements`。**唯一把通信线程数据搬到 UI 的位置。**
 
 #### 4.5.2 `ActuatorDebugViewModel`（732 行）+ `ActuatorDebugView.xaml`
@@ -525,6 +533,17 @@ Append(bytes)
 - 窗口关闭时 `SuspendUpdates()`，重新显示时与源集合重新同步（隐藏期间的 Add 被丢弃）；
 - code-behind 负责"自动跟随最新"+ `userHorizontalOffset` 保持横向滚动位置（`ScrollToEnd` 会重置 `HorizontalOffset`）。
 
+#### 4.5.5 `FirmwareUpgradeViewModel`（21 行）+ `FirmwareUpgradeView.xaml`（54 行）
+
+2026-10-21 新增的页面框架，当前只承载标题栏与串口区，内容区域留空。
+
+| 关注点 | 实现 |
+| --- | --- |
+| 串口连接保持 | 构造时注入主窗口共享的 `SerialSettings`，与执行器调试页**同一实例**；`connectionService` 在 `MainWindowViewModel` 级持有，切页不触碰 |
+| 页面结构 | 与执行器调试页一致的 `CardStyle` 标题栏：中文标题 + 英文副标题 + 连接状态芯片 + "串口设置"/"连接设备"按钮 |
+| 样式 | 沿用各视图自包含样式的既有组织方式，复制了所需的最小样式集；后续固件升级专属样式可独立演化，不影响调试页 |
+| 路由 | `MainWindowViewModel.FirmwareUpgrade` + 菜单项 + `ContentControl.Resources` 中的 `DataTemplate` |
+
 ---
 
 ## 5. 业务流程与数据流
@@ -534,7 +553,8 @@ Append(bytes)
 ```text
 App(MetroWindow 启动) → MainWindow ctor → new MainWindowViewModel()
   → 创建日志/串口/帧表/通道/调度/诊断/业务/VM（见 2.4）
-  → DataContext = VM → 默认选中"执行器调试"
+  → DataContext = VM → 默认选中"执行器调试"（菜单首位）
+  → 切到"固件升级"：仅 CurrentViewModel 换引用，串口与调度不受影响
 用户点"连接设备" → SerialSettingsViewModel.ToggleConnectionAsync
   → 校验端口 → connectionService.ConnectAsync
   → ConnectionStateChanged(true)

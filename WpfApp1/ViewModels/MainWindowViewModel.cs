@@ -52,11 +52,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             TimeProvider.System);
         DeviceInfo = new DeviceInformationService(Diagnostics);
         ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, MotorCommands, DeviceInfo, Diagnostics);
+        // 固件升级页与执行器调试页共享同一 SerialSettings 实例：
+        // 串口连接状态由主窗口级服务持有，页面切换不重置、不断开。
+        FirmwareUpgrade = new FirmwareUpgradeViewModel(SerialSettings);
         FrameChannel.FrameReceived += HandleStatusFrameReceived;
 
         MenuItems = new ObservableCollection<MenuItemViewModel>
         {
-            new("执行器调试", "\uE713", ActuatorDebug)
+            new("执行器调试", "\uE713", ActuatorDebug),
+            new("固件升级", "\uE895", FirmwareUpgrade)
         };
 
         SelectedMenuItem = MenuItems[0];
@@ -81,6 +85,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public MotorCommandService MotorCommands { get; }
 
     public ActuatorDebugViewModel ActuatorDebug { get; }
+
+    public FirmwareUpgradeViewModel FirmwareUpgrade { get; }
 
     public void Dispose()
     {
