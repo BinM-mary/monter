@@ -12,6 +12,41 @@
                  ShowMaxRestoreButton="True"
                  ShowCloseButton="True"
                  WindowStartupLocation="CenterOwner">
+    <mah:MetroWindow.Resources>
+        <!-- 蓝色主按钮：只比同一行的筛选控件略大一号。
+             显式清空 FocusVisualStyle 与 BorderThickness，避免获得键盘焦点或
+             鼠标悬停时被默认模板画出深色描边（深色边框在蓝底上非常突兀）。 -->
+        <Style x:Key="SaveDataButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#0078D4" />
+            <Setter Property="BorderBrush" Value="#0078D4" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Padding" Value="16,3" />
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="FontFamily" Value="Microsoft YaHei UI" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="mah:ControlsHelper.CornerRadius" Value="5" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#106EBE" />
+                    <Setter Property="BorderBrush" Value="#106EBE" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="#005A9E" />
+                    <Setter Property="BorderBrush" Value="#005A9E" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#A9C9E8" />
+                    <Setter Property="BorderBrush" Value="#A9C9E8" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </mah:MetroWindow.Resources>
+
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -45,55 +80,65 @@
                         VerticalAlignment="Center" />
         </DockPanel>
 
-        <WrapPanel Grid.Row="1"
-                   Margin="0,8,0,0"
-                   VerticalAlignment="Center">
-            <TextBlock Text="过滤："
-                       Margin="0,0,8,0"
-                       VerticalAlignment="Center" />
-            <TextBlock Text="方向"
-                       Margin="0,0,4,0"
-                       VerticalAlignment="Center" />
-            <ComboBox Width="78"
-                      Margin="0,0,12,0"
-                      ItemsSource="{Binding DirectionFilterOptions}"
-                      SelectedItem="{Binding SelectedDirectionFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <TextBlock Text="类型"
-                       Margin="0,0,4,0"
-                       VerticalAlignment="Center" />
-            <ComboBox Width="78"
-                      Margin="0,0,12,0"
-                      ItemsSource="{Binding TypeFilterOptions}"
-                      SelectedItem="{Binding SelectedTypeFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <TextBlock Text="ID"
-                       Margin="0,0,4,0"
-                       VerticalAlignment="Center" />
-            <ComboBox Width="88"
-                      Margin="0,0,12,0"
-                      ItemsSource="{Binding FrameIdFilterOptions}"
-                      SelectedItem="{Binding SelectedFrameIdFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <TextBlock Text="PID"
-                       Margin="0,0,4,0"
-                       VerticalAlignment="Center" />
-            <ComboBox Width="88"
-                      Margin="0,0,12,0"
-                      ItemsSource="{Binding ProtectedIdFilterOptions}"
-                      SelectedItem="{Binding SelectedProtectedIdFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <Button Content="重置筛选"
-                    Command="{Binding ResetFiltersCommand}"
-                    Padding="10,2"
-                    MinWidth="0"
-                    MinHeight="0"
-                    FontSize="12"
-                    mah:ControlsHelper.CornerRadius="5" />
-            <TextBlock Text="保留条数"
-                       Margin="16,0,4,0"
-                       VerticalAlignment="Center" />
-            <ComboBox Width="92"
-                      ItemsSource="{Binding RetentionOptions}"
-                      DisplayMemberPath="DisplayText"
-                      SelectedItem="{Binding SelectedRetentionOption, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-        </WrapPanel>
+        <!-- 筛选与导出同排：筛选靠左、空间不足时自行换行，保存数据固定在右端。
+             这样省掉一整行高度，右侧也只留下一个视觉边界。 -->
+        <DockPanel Grid.Row="1"
+                   Margin="0,8,0,0">
+            <Button DockPanel.Dock="Right"
+                    VerticalAlignment="Center"
+                    Margin="12,0,0,0"
+                    Content="保存数据"
+                    Command="{Binding SaveDataCommand}"
+                    Style="{StaticResource SaveDataButtonStyle}" />
+
+            <WrapPanel VerticalAlignment="Center">
+                <TextBlock Text="过滤："
+                           Margin="0,0,8,0"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="方向"
+                           Margin="0,0,4,0"
+                           VerticalAlignment="Center" />
+                <ComboBox Width="78"
+                          Margin="0,0,12,0"
+                          ItemsSource="{Binding DirectionFilterOptions}"
+                          SelectedItem="{Binding SelectedDirectionFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="类型"
+                           Margin="0,0,4,0"
+                           VerticalAlignment="Center" />
+                <ComboBox Width="78"
+                          Margin="0,0,12,0"
+                          ItemsSource="{Binding TypeFilterOptions}"
+                          SelectedItem="{Binding SelectedTypeFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="ID"
+                           Margin="0,0,4,0"
+                           VerticalAlignment="Center" />
+                <ComboBox Width="88"
+                          Margin="0,0,12,0"
+                          ItemsSource="{Binding FrameIdFilterOptions}"
+                          SelectedItem="{Binding SelectedFrameIdFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="PID"
+                           Margin="0,0,4,0"
+                           VerticalAlignment="Center" />
+                <ComboBox Width="88"
+                          Margin="0,0,12,0"
+                          ItemsSource="{Binding ProtectedIdFilterOptions}"
+                          SelectedItem="{Binding SelectedProtectedIdFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <Button Content="重置筛选"
+                        Command="{Binding ResetFiltersCommand}"
+                        Padding="10,2"
+                        MinWidth="0"
+                        MinHeight="0"
+                        FontSize="12"
+                        mah:ControlsHelper.CornerRadius="5" />
+                <TextBlock Text="保留条数"
+                           Margin="16,0,4,0"
+                           VerticalAlignment="Center" />
+                <ComboBox Width="92"
+                          ItemsSource="{Binding RetentionOptions}"
+                          DisplayMemberPath="DisplayText"
+                          SelectedItem="{Binding SelectedRetentionOption, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            </WrapPanel>
+        </DockPanel>
 
         <ListView x:Name="LogListView"
                   Grid.Row="3"
@@ -174,6 +219,8 @@
         <TextBlock Grid.Row="4"
                    Margin="0,8,0,0"
                    FontSize="12"
-                   Foreground="#6B6B6B" />
+                   Foreground="#6B6B6B"
+                   TextTrimming="CharacterEllipsis"
+                   Text="{Binding StatusMessage}" />
     </Grid>
 </mah:MetroWindow>

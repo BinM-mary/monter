@@ -55,6 +55,12 @@ public sealed class LinBusScheduler : IDisposable
     private SchedulerMode mode = SchedulerMode.Disconnected;
     private int appStepIndex;
     private bool pauseRequested;
+
+    /// <summary>
+    /// 应用帧总开关：为 false 时应用拍（0x15/0x33/0x34）一帧都不发，
+    /// 诊断独占与 OTA 升级流程完全不受影响。默认 true，仅用于现场测试临时静默总线。
+    /// </summary>
+    private bool applicationFramesEnabled = true;
     private bool pollingActive;
     private long pollFirstTarget;
     private long pollPeriod;
@@ -144,6 +150,83 @@ public sealed class LinBusScheduler : IDisposable
             lock (stateLock)
             {
                 return mode != SchedulerMode.Disconnected;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 应用帧开关（测试用）。为 false 时停止应用拍，总线只在诊断期间出现 3C/3D；
+    /// 设为 true 时若正处于应用模式且没有暂停/在途发送，立即从新一轮应用拍（0x15 起）恢复。
+    /// 该开关不影响诊断独占、响应轮询与 OTA 流程。
+    /// </summary>
+    public bool ApplicationFramesEnabled
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return applicationFramesEnabled;
+            }
+        }
+        set
+        {
+            Task? toStart = null;
+            long generation = 0;
+            lock (stateLock)
+            {
+                if (applicationFramesEnabled == value)
+                {
+                    return;
+                }
+
+                if (disposed)
+                {
+                    return;
+                }
+
+                applicationFramesEnabled = value;
+
+                if (!value)
+                {
+                    // 立即停掉已排定的下一拍；若本拍正在发送，帧边界处会自行退出。
+                    appTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                    return;
+                }
+
+                if (disposed || mode != SchedulerMode.AppRunning || pauseRequested
+                    || sendBusy || appSequence.Length == 0)
+                {
+                    return;
+                }
+
+                appStepIndex = 0;
+                sendBusy = true;
+                generation = ++sendGeneration;
+                toStart = RunAppBeatAsync(generation);
+                activeSendTask = toStart;
+            }
+
+            if (toStart is null)
+            {
+                return;
+            }
+
+            // 与 ExitDiagnosticModeAsync 同构：先让本拍发完，再恢复 100 ms 整拍定时器。
+            _ = ResumeAppTimerAfterBeatAsync(toStart, generation);
+        }
+    }
+
+    /// <summary>在锁外等待应用拍结束，再按需重排下一次 100 ms 定时器（打开应用帧开关时使用）。</summary>
+    private async Task ResumeAppTimerAfterBeatAsync(Task beat, long generation)
+    {
+        await WaitSafeAsync(beat).ConfigureAwait(false);
+
+        lock (stateLock)
+        {
+            if (!disposed && !pauseRequested && applicationFramesEnabled
+                && mode == SchedulerMode.AppRunning && !sendBusy && generation == sendGeneration)
+            {
+                appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
             }
         }
     }
@@ -376,6 +459,34 @@ public sealed class LinBusScheduler : IDisposable
     }
 
     /// <summary>
+    /// 有效 NRC 78 到达后延长本笔响应轮询的硬截止（架构/OTA升级流程.md §6.5）：
+    /// 只替换截止并按原节拍续排下一拍，不重锚节拍、不补发错过的拍。
+    /// ownerToken 必须是当前轮询的属主（旧事务、旧连接的迟到续期一律忽略）；
+    /// 若原截止已让轮询停止排拍，则按新截止重新激活，避免 78 之后不再发 3D。
+    /// </summary>
+    public void ExtendResponsePollingDeadline(object? ownerToken, long deadline)
+    {
+        lock (stateLock)
+        {
+            if (disposed
+                || mode != SchedulerMode.DiagnosticExclusive
+                || !ReferenceEquals(pollOwnerToken, ownerToken))
+            {
+                return;
+            }
+
+            if (deadline <= pollDeadline)
+            {
+                return;
+            }
+
+            pollDeadline = deadline;
+            pollingActive = true;
+            ScheduleNextPollLocked();
+        }
+    }
+
+    /// <summary>
     /// 等待发送出口空闲：先等调度器登记的在途任务，再等传输层真实写入排空。
     /// 外层 Send 等待被取消不代表物理写入已结束，排空以发送工作线程的
     /// 实际完成信号为准（F3/R8，审查方案 §4.3）。
@@ -415,7 +526,7 @@ public sealed class LinBusScheduler : IDisposable
             // 兜底：进入诊断时已清空，此处防止异常路径把旧登记带到下一轮切换。
             ClearAllPendingRepliesLocked();
 
-            if (!sendBusy && appSequence.Length > 0)
+            if (!sendBusy && appSequence.Length > 0 && applicationFramesEnabled)
             {
                 // 暂停在最后一帧之后：新一轮应用拍从 0x15 重新开始。
                 if (appStepIndex >= appSequence.Length)
@@ -440,7 +551,7 @@ public sealed class LinBusScheduler : IDisposable
         lock (stateLock)
         {
             // 恢复期间若又有诊断入队，重新进入的暂停仍按单帧边界生效，此处不再启动应用定时器。
-            if (!disposed && !pauseRequested && mode == SchedulerMode.AppRunning)
+            if (!disposed && !pauseRequested && applicationFramesEnabled && mode == SchedulerMode.AppRunning)
             {
                 appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
             }
@@ -481,7 +592,7 @@ public sealed class LinBusScheduler : IDisposable
         Task? toStart = null;
         lock (stateLock)
         {
-            if (disposed || mode != SchedulerMode.AppRunning)
+            if (disposed || mode != SchedulerMode.AppRunning || !applicationFramesEnabled)
             {
                 return;
             }
@@ -570,7 +681,7 @@ public sealed class LinBusScheduler : IDisposable
                 lock (stateLock)
                 {
                     if (disposed || mode != SchedulerMode.AppRunning || pauseRequested
-                        || appStepIndex >= appSequence.Length)
+                        || !applicationFramesEnabled || appStepIndex >= appSequence.Length)
                     {
                         return;
                     }
@@ -614,7 +725,7 @@ public sealed class LinBusScheduler : IDisposable
                     appStepIndex++;
 
                     // 暂停请求已在单帧写完后的帧边界生效，后续应用帧不再发送。
-                    if (disposed || mode != SchedulerMode.AppRunning || pauseRequested)
+                    if (disposed || mode != SchedulerMode.AppRunning || pauseRequested || !applicationFramesEnabled)
                     {
                         return;
                     }
@@ -792,7 +903,12 @@ public sealed class LinBusScheduler : IDisposable
                 // 新连接不继承旧连接的待回复登记。
                 ClearAllPendingRepliesLocked();
                 pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-                appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
+
+                // 应用帧开关为关闭时不启动应用定时器：连接后总线保持静默，诊断仍可正常进入。
+                if (applicationFramesEnabled)
+                {
+                    appTimer.Change(appPeriod, Timeout.InfiniteTimeSpan);
+                }
             }
             else
             {

@@ -6,11 +6,16 @@ namespace WpfApp1.Services;
 /// <summary>一次版本读取的结果：成功文本或失败原因（供界面提示）。</summary>
 public sealed class DeviceVersionResult
 {
-    private DeviceVersionResult(bool success, string? versionText, DiagnosticFailureReason failureReason)
+    private DeviceVersionResult(
+        bool success,
+        string? versionText,
+        DiagnosticFailureReason failureReason,
+        DiagnosticNegativeResponse? negativeResponse)
     {
         Success = success;
         VersionText = versionText;
         FailureReason = failureReason;
+        NegativeResponse = negativeResponse;
     }
 
     public bool Success { get; }
@@ -20,32 +25,22 @@ public sealed class DeviceVersionResult
 
     public DiagnosticFailureReason FailureReason { get; }
 
+    /// <summary>设备返回的完整负响应（7F + 原 SID + NRC）；不是负响应失败时为 null。</summary>
+    public DiagnosticNegativeResponse? NegativeResponse { get; }
+
     public static DeviceVersionResult Succeeded(string versionText) =>
-        new(true, versionText, DiagnosticFailureReason.None);
+        new(true, versionText, DiagnosticFailureReason.None, null);
 
-    public static DeviceVersionResult Failed(DiagnosticFailureReason reason) =>
-        new(false, null, reason);
+    public static DeviceVersionResult Failed(
+        DiagnosticFailureReason reason,
+        DiagnosticNegativeResponse? negativeResponse = null) =>
+        new(false, null, reason, negativeResponse);
 
-    public string FailureText => FailureReason switch
-    {
-        DiagnosticFailureReason.EchoTimeout => "未收到 3C 回显",
-        DiagnosticFailureReason.RequestWriteFailed => "诊断请求发送失败",
-        DiagnosticFailureReason.RequestWriteTimeout => "诊断请求写入超时",
-        DiagnosticFailureReason.ResponseMismatch => "设备响应与预期不符",
-        DiagnosticFailureReason.DeadlineExceeded => "等待设备响应超时",
-        DiagnosticFailureReason.ResponseDeadlineExceeded => "等待设备响应超时",
-        DiagnosticFailureReason.SendDeadlineExceeded => "诊断请求发送超时",
-        DiagnosticFailureReason.InterFrameDeadlineExceeded => "诊断分片间隔超限",
-        DiagnosticFailureReason.ProtocolAttributionError => "诊断响应归属异常",
-        DiagnosticFailureReason.Cancelled => "诊断已取消",
-        DiagnosticFailureReason.QueueAborted => "诊断已中止",
-        DiagnosticFailureReason.DiagnosticGateClosed => "诊断已锁止，需复位或重启",
-        DiagnosticFailureReason.InvalidRequest => "诊断请求参数非法",
-        DiagnosticFailureReason.Disconnected => "串口已断开",
-        DiagnosticFailureReason.Shutdown => "诊断已终止",
-        // 未知未来枚举保留兜底，但显示原因标识，避免掩盖已知值遗漏（实施计划 §4.9.2）。
-        _ => $"读取失败（{FailureReason}）"
-    };
+    // 失败文案与 OTA 流程共用同一套映射（Models/DiagnosticFailureText），不在本类另写一份；
+    // 负响应在原因后附带原始 UDS 与 NRC，便于定位设备拒绝的具体原因。
+    public string FailureText => NegativeResponse is { } negative
+        ? $"{DiagnosticFailureText.Describe(FailureReason)}（{negative.Describe()}）"
+        : DiagnosticFailureText.Describe(FailureReason);
 }
 
 /// <summary>
@@ -55,7 +50,7 @@ public sealed class DeviceVersionResult
 /// </summary>
 public sealed class DeviceInformationService
 {
-    /// <summary>统一的诊断 NAD（§2）。</summary>
+    /// <summary>默认诊断 NAD（§2）：未显式指定时的回退值（固件页 NAD 输入框的默认值同源）。</summary>
     public const byte DiagnosticNad = 0x78;
 
     private const byte ReadDataByIdentifier = 0x22;
@@ -68,12 +63,16 @@ public sealed class DeviceInformationService
         this.transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
     }
 
-    public async Task<DeviceVersionResult> ReadVersionAsync(DeviceVersionKind kind)
+    /// <summary>
+    /// 读取设备版本。<paramref name="nad"/> 为空时使用默认 NAD（0x78）；
+    /// 诊断与后续 OTA 发送的 NAD 组装统一由调用方显式传入，服务内不再写死来源。
+    /// </summary>
+    public async Task<DeviceVersionResult> ReadVersionAsync(DeviceVersionKind kind, byte? nad = null)
     {
         var (highByte, lowByte) = GetIdentifier(kind);
         var request = new DiagnosticRequest
         {
-            Nad = DiagnosticNad,
+            Nad = nad ?? DiagnosticNad,
             UdsRequest = [ReadDataByIdentifier, highByte, lowByte],
             ExpectedResponsePrefix = [ReadDataPositiveResponse, highByte, lowByte]
         };
@@ -81,7 +80,7 @@ public sealed class DeviceInformationService
         var result = await transactionService.ExecuteAsync(request).ConfigureAwait(false);
         if (!result.Success)
         {
-            return DeviceVersionResult.Failed(result.Reason);
+            return DeviceVersionResult.Failed(result.Reason, result.NegativeResponse);
         }
 
         // 正响应：62 F1 xx + 版本数据；长度由 FF 声明决定，此处按实际长度取剩余字节。

@@ -2,7 +2,7 @@
 
 - 文档日期：2026-10-20，2026-10-21 增补
 - 2026-10-21 文档补充：诊断前“应用待回复标志 + 从触发起最多等待 100 ms”的收尾策略已接入 `LinBusScheduler`，见第 6.2 节及诊断架构讨论记录第 19 节。
-- 2026-10-21 文档补充：新增“固件升级”页面（侧边栏第二项），导航与页面结构见第 4.5.1、4.5.5 节；页面内容区暂为空，升级业务尚未实现。
+- 2026-10-21 文档补充：新增“固件升级”页面（侧边栏第二项），导航与页面结构见第 4.5.1、4.5.5 节；并已实现固件文件加载（.bin/.hex）、信息展示与十六进制预览（服务层解析，与界面解耦），设备升级传输尚未实现，进度区为占位。
 - 适用代码：`main` 分支，提交 `18f67a1`（`feat: support LIN 0x3C multi-frame diagnostics`）及其后工作区状态
 - 文档性质：对**现有代码**的静态梳理与评价，不含未实现功能的承诺
 - 依据材料：源代码全文、`../协议/PROTOCOL.md`、`../版本/CHANGELOG.md`、`../版本/VERSION_HISTORY.md`、`WpfApp1诊断架构讨论记录.md`、`../修复/` 目录三份设计与修复文档、`../入门/WPF_MahApps_MVVM_基础框架搭建.md`
@@ -42,10 +42,15 @@ WPF 上位机 ──串口(COM)──> LIN 主节点中间件 ──LIN 总线�
 | 诊断 `0x3C/0x3D` 单帧（SF）版本读取（Bootloader/固件/硬件） | 已实现 | 读取设备信息卡片 |
 | 诊断 `0x3C` 多帧（FF+CF）请求发送能力 | 已实现（无界面入口） | 仅 API |
 | 报文输出窗口（收发报文、四维筛选、暂停、保留条数） | 已实现 | 底部状态栏 |
+| 报文数据导出 Excel（`.xlsx`，导出当前筛选结果） | 已实现 | 报文输出窗口“保存数据” |
 | 电机预设位置本地配置（`config/motor-presets.json`） | 已实现 | 统一配置 Flyout |
 | 应用帧 `0x34` 温度/电压读取（100 ms 周期）与界面绑定 | 已实现 | 执行器调试页 |
-| 固件升级页面框架（标题栏 + 串口区，内容留空） | 已实现 | 固件升级页 |
-| UDS 负响应（`7F`）结构化解析、OTA/升级业务 | 未实现 | — |
+| 固件升级页面框架（标题栏 + 串口区） | 已实现 | 固件升级页 |
+| 固件文件加载（.bin/.hex）、信息展示与十六进制预览 | 已实现 | 固件升级页 |
+| OTA 升级流程第一至第十五步（在线确认 + 仅读 APP 版本 + 再次确认 + 扩展/编程会话 + 安全访问 + 擦除 + 下载申请 + 逐块传输 + 结束传输 + 固件校验 + 设备复位） | 已实现（擦除仅 HEX；Bootloader/硬件版本默认跳过） | `OtaUpgradeService` + `DiagnosticSessionService` + `SecurityAccessService` + `EraseFlashService` + `FirmwareDownloadService` + `FirmwareVerificationService` + `EcuResetService` + 固件升级页 |
+| 复位后的启动验证（新固件是否运行） | 未实现（有意不自动化） | 需实机确认探测方式、等待时间与预期版本；`51 01` 只证明设备接受复位 |
+| UDS 负响应（`7F`）结构化解析与 NRC 文案 | 已实现 | `DiagnosticTransactionService` + `Models/Diagnostics.cs` |
+| NRC `78` 响应待定：续期等待窗口、TP 续收、3D 截止联动 | 已实现（离线 22 项） | 协调层 + `LinBusScheduler.ExtendResponsePollingDeadline`，设计见 `架构/OTA升级流程.md` §6.5 |
 | 设备运行参数写入（NAD、休眠、方向等） | **界面占位，无绑定** | — |
 
 ### 1.3 技术栈
@@ -76,7 +81,8 @@ WPF 上位机 ──串口(COM)──> LIN 主节点中间件 ──LIN 总线�
 │ 表现层 (Views)                                                           │
 │   MainWindow.xaml（MetroWindow + HamburgerMenu + Flyout + 状态栏）        │
 │   ActuatorDebugView.xaml（执行器调试页，UserControl）                     │
-│   FirmwareUpgradeView.xaml（固件升级页，UserControl，内容待填充）          │
+│   FirmwareUpgradeView.xaml（固件升级页，UserControl：文件信息/日志/操作）  │
+│   FirmwareContentWindow.xaml(.cs)（文件内容独立窗口，与主页面共享 VM）     │
 │   ProtocolLogWindow.xaml（独立报文窗口）+ 少量 code-behind（滚动/窗口）    │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 │ Binding / Command
@@ -84,6 +90,7 @@ WPF 上位机 ──串口(COM)──> LIN 主节点中间件 ──LIN 总线�
 │ 视图模型层 (ViewModels)                                                  │
 │   MainWindowViewModel      —— 组合根 + 导航 + 0x33 分发 + 生命周期        │
 │   ActuatorDebugViewModel   —— 电机操作、状态显示、版本读取、预设配置      │
+│   FirmwareUpgradeViewModel —— 固件加载命令、信息/预览映射、页内日志        │
 │   SerialSettingsViewModel  —— 串口设置、连接、端口轮询                    │
 │   ProtocolLogWindowViewModel —— 报文筛选/暂停/保留条数                    │
 └───────────────────────────────┬──────────────────────────────────────────┘
@@ -91,6 +98,14 @@ WPF 上位机 ──串口(COM)──> LIN 主节点中间件 ──LIN 总线�
 ┌───────────────────────────────▼──────────────────────────────────────────┐
 │ 应用业务层 (Application)                                                 │
 │   DeviceInformationService —— 版本 DID 映射、UDS 请求构造、ASCII 解释      │
+│   DiagnosticSessionService —— 会话控制（10 03/10 02）、正响应判定         │
+│   SecurityAccessService   —— 安全访问（27 09/27 0A）、Key 计算            │
+│   EraseFlashService       —— 擦除（31 01 FF 00 + 起始地址 + 长度）        │
+│   FirmwareDownloadService —— 下载（34/74、36/76、37/77 构造与解析）       │
+│   FirmwareVerificationService —— 固件校验（31 01 02 02 + CRC32 + 结果）   │
+│   EcuResetService          —— 设备复位（11 01 → 51 01，SF、不重发）       │
+│   OtaUpgradeService        —— OTA 流程编排（第一至第十五步，独占保持）    │
+│   FirmwareFileService      —— 固件文件加载（BIN/HEX）、CRC32、后台解析    │
 │   MotorCommandService      —— 0x15 指令快照（无发送能力）                 │
 │   MotorStatusFrameParser   —— 0x33 DATA → MotorStatusSnapshot            │
 │   MotorPresetStorageService—— 本地 JSON 配置读写（原子替换）              │
@@ -163,8 +178,15 @@ MotorCommandService()
 LinBusScheduler(FrameChannel, MotorCommands, TimeProvider.System)
 DiagnosticTransactionService(FrameChannel, BusScheduler, TimeProvider.System)
 DeviceInformationService(Diagnostics)
+DiagnosticSessionService(Diagnostics)
+SecurityAccessService(Diagnostics)
+EraseFlashService(Diagnostics)
+FirmwareDownloadService(Diagnostics)
+FirmwareVerificationService(Diagnostics)
+EcuResetService(Diagnostics)
+OtaUpgradeService(Diagnostics, DeviceInfo, SessionControl, SecurityAccess, EraseFlash, FirmwareDownload, FirmwareVerification, EcuReset, TimeProvider.System)
 ActuatorDebugViewModel(SerialSettings, MotorCommands, DeviceInfo, Diagnostics)
-FirmwareUpgradeViewModel(SerialSettings)   // 与调试页共用同一 SerialSettings
+FirmwareUpgradeViewModel(SerialSettings, OtaUpgrade)   // 与调试页共用同一 SerialSettings；内部 new FirmwareFileService（可注入替换）
 ```
 
 对象图（→ 表示持有引用）：
@@ -180,9 +202,18 @@ MainWindow
      ├─ LinBusScheduler ──> Channel, MotorCommands
      ├─ DiagnosticTransactionService ──> Channel, Scheduler, LinTransportProtocol
      ├─ DeviceInformationService ──> Diagnostics
+     ├─ DiagnosticSessionService ──> Diagnostics
+     ├─ SecurityAccessService ──> Diagnostics
+     ├─ EraseFlashService ──> Diagnostics
+     ├─ FirmwareDownloadService ──> Diagnostics
+     ├─ FirmwareVerificationService ──> Diagnostics
+     ├─ EcuResetService ──> Diagnostics
+     ├─ OtaUpgradeService ──> Diagnostics, DeviceInfo, SessionControl, SecurityAccess, EraseFlash,
+     │                        FirmwareDownload, FirmwareVerification, EcuReset
      └─ ActuatorDebugViewModel ──> SerialSettings, MotorCommands, DeviceInfo, Diagnostics,
                                     MotorPresetStorageService（内部 new）
-     └─ FirmwareUpgradeViewModel ──> SerialSettings（与调试页同一实例）
+     └─ FirmwareUpgradeViewModel ──> SerialSettings（与调试页同一实例）、FirmwareFileService（内部 new）
+                                    ──> IntelHexParser / FirmwareHexFormatter（静态纯函数）
 ```
 
 反向依赖只有事件订阅：
@@ -217,32 +248,49 @@ WpfApp1/
 
 | 文件 | 行数 | 角色 |
 | --- | ---: | --- |
-| `Services/DiagnosticTransactionService.cs` | 2220 | 诊断事务协调层（最复杂，改动风险最高） |
-| `Services/LinBusScheduler.cs` | 837 | 统一发送调度器（含诊断前应用回复收尾） |
-| `ViewModels/ProtocolLogWindowViewModel.cs` | 620 | 报文窗口筛选/暂停/镜像集合 |
+| `Services/DiagnosticTransactionService.cs` | 2420 | 诊断事务协调层（最复杂，改动风险最高；含 OTA 独占保持、负响应分类与 NRC 78 续期） |
+| `Services/LinBusScheduler.cs` | 948 | 统一发送调度器（含诊断前应用回复收尾、3D 轮询截止续期、应用帧测试开关） |
+| `ViewModels/ProtocolLogWindowViewModel.cs` | 676 | 报文窗口筛选/暂停/镜像集合/保存数据 |
 | `ViewModels/ActuatorDebugViewModel.cs` | 732 | 执行器调试页全部交互 |
 | `Services/SerialPortConnectionService.cs` | 509 | 串口连接 + 双队列 |
 | `Services/LinTransportProtocol.cs` | 362 | LIN-TP 编解码与重组状态机 |
 | `ViewModels/SerialSettingsViewModel.cs` | 339 | 串口设置与端口监测（两页共用） |
 | `MainWindow.xaml` | 329 | 主窗口布局与样式 |
 | `Services/LinFrameChannel.cs` | 309 | 帧通道 |
-| `Models/Diagnostics.cs` | 289 | 诊断请求/结果/进度/枚举 |
+| `Models/Diagnostics.cs` | 422 | 诊断请求/结果/进度/枚举、负响应与 78 续期通知、失败文案与 NRC 映射 |
 | `Views/ActuatorDebugView.xaml` | 271 | 调试页布局（大量内联样式） |
 | `Services/LinReadReplyParser.cs` | 253 | 共享接收解析 |
 | `Services/LinFrameCodec.cs` | 241 | 构帧与校验算法 |
 | `Models/CommunicationLogEntry.cs` | 229 | 报文记录的显示语义（4 种串口形态判别） |
 | `Services/CommunicationLogService.cs` | 224 | 日志汇集与 UI 批处理 |
-| `Views/ProtocolLogWindow.xaml(.cs)` | 179 + 200 | 报文窗口 + 滚动跟随 code-behind |
-| `ViewModels/MainWindowViewModel.cs` | 133 | 组合根、导航、0x33/0x34 分发 |
-| `Views/FirmwareUpgradeView.xaml` | 54 | 固件升级页框架（内容区待填充） |
-| `ViewModels/FirmwareUpgradeViewModel.cs` | 21 | 固件升级页（当前仅持有串口设置） |
+| `Services/CommunicationLogExcelExporter.cs` | 473 | 报文导出 `.xlsx`（手写最小 OOXML 包，无第三方依赖） |
+| `Views/ProtocolLogWindow.xaml(.cs)` | 226 + 200 | 报文窗口 + 滚动跟随 code-behind |
+| `ViewModels/MainWindowViewModel.cs` | 173 | 组合根、导航、0x33/0x34 分发、OTA 服务接线、应用帧测试开关 |
+| `Views/FirmwareUpgradeView.xaml` | 231 | 固件升级页布局（文件信息/日志/升级操作，内联样式） |
+| `Views/FirmwareContentWindow.xaml(.cs)` | 137 + 22 | 文件内容独立窗口（十六进制查看器） |
+| `ViewModels/FirmwareUpgradeViewModel.cs` | 629 | 固件加载命令、NAD 输入、OTA 启动、日志与进度（1–15 步）、NRC 78 提示（成功不追加汇总日志） |
+| `Services/OtaUpgradeService.cs` | 861 | OTA 升级流程编排（第一至第十五步，仅读 APP 版本、第三/四步默认跳过，复位后 50 ms 复核 APP 版本，含块切片/偏移/块号、块间 10 ms 间隔、复位编排与 NRC 78 提示转发；完成只报进度节点） |
+| `Models/OtaSession.cs` | 309 | OTA 阶段/分步报告/结果模型（含擦除、下载、校验与复位结果快照，复位快照带复位后 APP 版本） |
+| `Services/FirmwareDownloadService.cs` | 460 | 下载业务（`34`/`74`、`36`/`76`、`37`/`77` 构造与解析，74 块长校验，`36` 片间 20 ms 间隔） |
+| `Services/FirmwareVerificationService.cs` | 196 | 固件校验业务（`31 01 02 02` + 地址/大小/CRC32，结果 00/01 判定） |
+| `Services/EcuResetService.cs` | 135 | 设备复位业务（`11 01` 两字节 SF 请求，只认恰好 `51 01`） |
+| `Models/FirmwareTransferPlan.cs` | 167 | 下载/校验参数快照（复用擦除范围，数据副本与 CRC32 复算，含临时 `Crc32TestXor` 测试开关） |
+| `Models/FirmwareCrc32.cs` | 43 | CRC-32（IEEE 802.3）纯算法，供加载显示与第十四步校验共用 |
+| `Services/EraseFlashService.cs` | 155 | 擦除业务（`31 01 FF 00` 12 字节多帧请求与正响应判定） |
+| `Models/ErasePlan.cs` | 140 | 擦除参数快照（地址/长度来自固件映像，含范围校验） |
+| `Services/SecurityAccessService.cs` | 222 | 安全访问业务（`27 09`/`27 0A`、Key 计算） |
+| `Services/DiagnosticSessionService.cs` | 128 | 会话控制业务（`10 03`/`10 02` 与正响应格式判定） |
+| `Services/IntelHexParser.cs` | 226 | Intel HEX 解析与映像归一化 |
+| `Services/FirmwareFileService.cs` | 100 | 固件文件加载（BIN/HEX），CRC32 复用 `Models/FirmwareCrc32` |
+| `Services/FirmwareHexFormatter.cs` | 123 | 十六进制预览行与文本构建 |
+| `Models/FirmwareImage.cs` | 63 | 固件相关纯数据模型 |
 | `Services/MotorPresetStorageService.cs` | 109 | 预设 JSON 读写 |
-| `Services/DeviceInformationService.cs` | 103 | 版本读取业务 |
+| `Services/DeviceInformationService.cs` | 89 | 版本读取业务（可覆盖 NAD） |
 | `MainWindow.xaml.cs` | 94 | 主窗口 code-behind |
 | `Models/DiagnosticMultiFrameOptions.cs` | 73 | 多帧时间参数 |
 | 其余 Model / 接口 / 控件 | < 70 | 见各文件头部注释 |
 
-合计约 **8.8k 行**（含 XAML），其中 `Services/` 约 5.2k 行，是本项目的重心。
+合计约 **9.9k 行**（含 XAML），其中 `Services/` 约 5.7k 行，是本项目的重心。
 
 ---
 
@@ -354,9 +402,11 @@ Append(bytes)
 
 ### 4.3 协议与调度层
 
-#### 4.3.1 `LinBusScheduler`（673 行）— 唯一发送出口
+#### 4.3.1 `LinBusScheduler`（948 行）— 唯一发送出口
 
 三个状态：`AppRunning` / `DiagnosticExclusive` / `Disconnected`；应用拍内部使用**帧序列 + 索引** `appSequence`（`0x15` 写入、`0x33` 读取、`0x34` 读取）和 `appStepIndex`。
+
+**应用帧测试开关** `ApplicationFramesEnabled`（默认 `true`）：为 `false` 时连接成功也不启动应用定时器，应用拍无法启动，`RunAppBeatAsync` 在帧边界退出；诊断进入/退出、3D 轮询与 OTA 全流程不受影响，退出诊断后也不会恢复应用帧。该开关仅为现场静默总线测试用，初始值由组合根 `MainWindowViewModel.EnableApplicationFrames` 常量给出。
 
 **应用拍（100 ms，拍内 10 ms 帧间隔）**：单次定时器触发 → 先排下一拍（100 ms，单次）→ 若 `sendBusy` 或已请求暂停则跳过 → `RunAppBeatAsync`：
 1. 从 `appSequence[appStepIndex]` 取当前帧，索引指向下一帧；
@@ -400,7 +450,7 @@ Append(bytes)
 
 设计取舍（已文档化为项目决策）：重组期间收到同 NAD 的另一条合法 SF/FF，直接放弃本次重组而不把新首帧当起点——因为响应连续性已被破坏，宁可失败也不拼接两条响应。`CheckTimeout` 由协调层的 10 ms 检查定时器驱动。
 
-#### 4.3.3 `DiagnosticTransactionService`（2220 行）— 诊断事务协调层
+#### 4.3.3 `DiagnosticTransactionService`（2420 行）— 诊断事务协调层
 
 这是全项目最复杂、风险最高的文件。核心结构：
 
@@ -448,11 +498,19 @@ Append(bytes)
 | `WaitingResponse` | 命中**任一已尝试片**的回显：容忍窗口内丢弃；超窗 → `ProtocolAttributionError`（归属异常，关门禁） |
 | `WaitingResponse` 且首个 3D 未提交 | 首读在途 → 有界暂存（上限 32）；首读未开始 → 丢弃；回执后按原接收时间重放（F2） |
 
+**NRC 78 响应待定**（`架构/OTA升级流程.md` §6.5，已实现）：
+- `ApplyTpResult` 先分类负响应：完整 `7F + 原 SID + 78` 不结束本笔，按 `packet.ReceivedTimestamp + ResponseWindow` 续期 `ResponseDeadline`（SF 窗口取 `TotalDeadline`、多帧取 `ResponseBudget`，不另设绝对上限）；
+- TP 在本条 SF 收齐后已进入 `Completed`，续期分支立即 `BeginReceive` 重新准备接收；不清空串口共享缓存，同一字节块内紧跟的最终响应可依次进入；
+- 同步调用 `scheduler.ExtendResponsePollingDeadline(transaction, deadline)`：只替换 3D 轮询截止并按原节拍续排，不重锚、不补发；原截止已停止排拍时重新激活；
+- 回显截止独立、不因 `78` 延长；最终正响应已核对、只等回显时不再接受续期；迟到的 `78` 在接收入口按原截止先判失败；
+- `ResponsePendingReceived` 事件在协调层锁外触发（锁内只写 `PendingNotice`，接收入口出锁后派发），供升级页写“设备处理中”日志，不改变结果。
+
 **失败策略 `ApplyBatchPolicyLocked`**：
 
 | 失败原因 | 单笔 | 清空同批 | 关闭门禁 |
 | --- | --- | --- | --- |
 | `ResponseMismatch`（含未解析 `7F`） | ✔ 结束本笔 | ✘ | ✘ |
+| `NegativeResponse`（`7F + 原 SID + NRC`，NRC 非 78） | ✔ 结束本笔 | ✘ | ✘ |
 | 多帧/发送类失败、`EchoTimeout`（多帧） | ✔ | ✔ `QueueAborted` | ✘ |
 | `ResponseDeadlineExceeded` / `DeadlineExceeded` | ✔ | ✔ | ✘（收窄后的决策：设备无应答概率下，锁死整轮代价过高） |
 | `ProtocolAttributionError` | ✔ | ✔ | ✔ |
@@ -465,13 +523,13 @@ Append(bytes)
 
 ### 4.4 应用业务层
 
-#### 4.4.1 `DeviceInformationService`（103 行）
+#### 4.4.1 `DeviceInformationService`（102 行）
 
-- 固定 NAD `0x78`，服务 `0x22`（ReadDataByIdentifier）；
+- 固定 NAD `0x78`（未显式指定时的回退值），服务 `0x22`（ReadDataByIdentifier）；
 - DID 映射：Bootloader `F1 80`、Firmware `F1 95`、Hardware `F1 93`；
 - 预期正响应前缀 `62 + DID`；
 - 成功后把去掉前 3 字节的剩余数据按 ASCII 解释（**长度由 FF 声明动态决定**，不写死 33 字节），`TrimEnd()` 后返回；
-- 失败原因映射为中文文案（`FailureText`，兜底会显示枚举名以便发现遗漏）。
+- 失败原因映射为中文文案（`FailureText`，兜底会显示枚举名以便发现遗漏）；设备返回负响应时在原因后附带 `7F xx NRC` 与中文 NRC 说明。
 
 #### 4.4.2 `MotorCommandService`（70 行）
 
@@ -495,6 +553,62 @@ Append(bytes)
 #### 4.4.4 `MotorPresetStorageService`（109 行）
 
 `config/motor-presets.json` 的读写：版本号 + 预设数组；读取时严格校验（版本、条数、ID 集合、非负），不合法回退默认值并尝试重写；保存用 `.tmp` + `File.Move(overwrite)` 原子替换。
+
+#### 4.4.5 `DiagnosticSessionService`（128 行）
+
+OTA 第六、七步的会话业务层，只构造请求、判定正响应格式，**不处理 TP、调度、超时与 OTA 独占**：
+
+- 会话切换共用 `EnterSessionAsync(sessionType, nad, token)`：请求 `10 + 子功能`，预期正响应前缀 `50 + 子功能`；
+- `EnterExtendedSessionAsync`（`03`）、`EnterProgrammingSessionAsync`（`02`，只进入会话、不含解锁）；
+- 成功要求完整 UDS 长度为 6 字节（`50 xx + P2(2) + P2*(2)`），后四字节**不解析、不建属性、不改变任何计时**；
+- 长度不符返回 `ResponseMismatch`，补充说明带子功能与实际长度（如 `10 02 正响应长度为 4 字节，预期 6 字节`）；设备负响应原样带回 `DiagnosticNegativeResponse`。
+- 关联契约：`Models/Diagnostics.cs` 的 `DiagnosticNegativeResponse`（原 SID/NRC/原始 UDS）、`DiagnosticNrcText`（NRC 中文映射）、`DiagnosticFailureReason.NegativeResponse`；分类点在 `DiagnosticTransactionService.ApplyTpResult`（完整 UDS 收齐后先判负响应，再核对正响应前缀）。
+- 第八、九步的安全访问由同层 `SecurityAccessService` 承担（§4.4.6），本服务不扩展。
+
+#### 4.4.6 `SecurityAccessService`（222 行）
+
+OTA 第八、九步的安全访问业务层，与 `DiagnosticSessionService` 同层同位：只构造请求、判定正响应格式、计算 Key，**不处理 TP、调度、超时与 OTA 独占**，不缓存 Seed/Key。
+
+- `RequestSeedAsync`：请求 `27 09`，预期前缀 `67 09`；成功要求完整 UDS 恰为 6 字节（`67 09 + 四字节 Seed`），Seed 按报文顺序原样返回，不颠倒字节；
+- `SendKeyAsync`：请求 `27 0A + 四字节 Key`（6 字节 UDS，仍为 SF），预期前缀 `67 0A`；成功要求完整 UDS 恰为 2 字节；Key 以二进制发送，不转 ASCII；
+- 两者长度不符均返回 `ResponseMismatch` 并给出实际/预期长度；设备负响应原样带回 `DiagnosticNegativeResponse`；
+- `SeedToKey`（uint 返回值）与 `CreateKey`（线上顺序四字节）是纯函数：按用户提供的 `FLB_SeedToKey` 原式与 mask `0x3B61B270` 计算，Key 高字节先发送，不使用宿主端序拷贝；
+- 全零 Seed 的路径未确认：`IsZeroSeed` 只做标记，由 `OtaUpgradeService` 决定（当前记日志后退出、不发 Key，`架构/OTA升级流程.md` §8.3）。
+
+#### 4.4.7 `EraseFlashService`（155 行）+ `ErasePlan`（140 行）
+
+OTA 第十步的擦除业务层，与前两个业务服务同层同位：只构造请求、判定正响应格式，**不处理 TP、调度、超时与 OTA 独占**，不重发、不追加 `31 03` 结果查询。
+
+- `ErasePlan`（`Models/ErasePlan.cs`）：不可变参数快照，保存 `StartAddress`、`Length`、来源格式与文件名；`ToUdsRequest()` 生成 `31 01 FF 00` + 大端四字节起始地址 + 大端四字节字节长度共 12 字节；不插 `44` 格式标识，也不把结束地址当长度。
+- `TryCreate(FirmwareImage)` 的硬校验只有四条：`BIN` 直接拒绝（`BaseAddress=0` 是加载默认值，不是设备 APP 地址）、`BaseAddress` 必须落在 `0..0xFFFFFFFF`、`ImageSize` 必须大于 0 且不超过四字节长度字段、`BaseAddress + Length` 不得越过 32 位地址空间。分区、页对齐等依赖设备契约的规则未擅自实现。
+- `EraseAsync`：12 字节请求必须显式提供 `DiagnosticMultiFrameOptions`（默认值即 §10.5 基线），预期前缀 `71 01 FF 00`；正响应长度不足或前缀不符返回 `ResponseMismatch`。
+- 状态记录（`71 01 FF 00` 之后的内容）原样放 `EraseResult.StateRecord`，**不解释、不补 `00`、不作为擦除完成判据**；`OtaEraseOutcome.CompletionConfirmed` 恒为 `false`，升级日志只写“请求已被设备接受”。
+
+#### 4.4.8 `FirmwareDownloadService`（446 行）+ `FirmwareTransferPlan`（167 行）
+
+OTA 第十一至第十三步的下载业务层，与擦除服务同层同位：只构造/解析 `34`/`36`/`37`，**不保存块偏移、不重传、不处理 TP 与超时**。
+
+- `FirmwareTransferPlan`：地址与长度直接取自第十步已提交的 `ErasePlan`，数据为加载时映像的副本，CRC32 按该副本复算（`FirmwareCrc32`）；长度或起始地址与映像不一致时拒绝生成，确保 34/36/37/31 02 02 全程同源；`BIN` 在第十步已被拒绝，这里不会拿到范围。**临时测试开关** `Crc32TestXor`（默认 `0`，`x ^ 0 == x` 不改变行为）：非 `0` 时对复算结果异或，只扰动发给设备的校验值，界面「校验值」仍来自 `FirmwareImage.Crc32`，用于验证设备侧校验失败路径；测完必须改回 `0`。
+- `RequestDownloadAsync`：`34 00 44` + 大端地址 + 大端字节长度（11 字节，必走多帧）；解析 `74` 时校验长度格式高四位 1～4、响应恰为 `2 + n` 字节、块长 > 2 且 ≤ 4095，容量 `= min(块长 − 2, 128)`。
+- `TransferDataAsync`：`36 + 块号 + 数据`，长度 > 6 显式给多帧选项（`MinimumInterFrameGap = FrameGap = 20 ms`；末块很短时按 SF）；正响应必须恰为 `76 BSC` 且块号与当前块一致，否则返回 `ResponseMismatch` 并保留原始响应。
+- `RequestTransferExitAsync`：单字节 `37`，要求完整响应恰为 1 字节 `77`。
+
+#### 4.4.9 `FirmwareVerificationService`（196 行）
+
+OTA 第十四步的校验业务层：
+
+- 请求 16 字节 `31 01 02 02 + 地址 + 大小 + CRC32`，CRC 用 `WriteUInt32BigEndian` 写入（高字节先发，不依赖宿主端序）；
+- 只接受完整 5 字节 `71 01 02 02 Result`；`00` 成功、`01` 业务失败（`RoutineFailed=true`，不伪装成 NRC=01）、其他结果值按未知失败并给出十六进制；
+- RID 与擦除的 `FF00` 明确区分，不复用擦除服务的判定。
+
+#### 4.4.10 `EcuResetService`（135 行）
+
+OTA 第十五步的复位业务层，与校验服务同层同位：
+
+- 请求固定两字节 `11 01`（SID + 子功能 01），走既有 SF 时序（`DiagnosticTiming.Default`：t0 + 20 ms 首拍、20 ms 节拍、回显 1000 ms、总截止 5 s）；
+- 只接受完整 2 字节 `51 01`：`51 02` 等其他子功能、错误长度都不判成功；正响应前缀交给协调层匹配，业务层再做长度与子功能复核；
+- 有效 `7F 11 78` 由协调层续期 5 s 并继续 3D，本类不重发复位；非 78 负响应原样返回给编排层记录；
+- 不自动重连、不补发 `10 01`、不新建计时器体系；`51 01` 只代表设备接受复位请求，不代表新固件已启动。
 
 ### 4.5 表现层
 
@@ -525,24 +639,48 @@ Append(bytes)
 - 连接前校验端口是否仍存在；已连接端口消失 → 自动断开并提示"串口已移除"；
 - **连接/断开由 VM 调服务**，但 `LinBusScheduler` 是通过 `ConnectionStateChanged` 事件被动感知的，两条路径最终汇聚到同一事件。
 
-#### 4.5.4 `ProtocolLogWindow` + `ProtocolLogWindowViewModel`（179 + 200 + 620 行）
+#### 4.5.4 `ProtocolLogWindow` + `ProtocolLogWindowViewModel`（226 + 200 + 676 行）
 
 - VM 用**镜像集合** `displayedEntries` + `ListCollectionView` 实现"暂停显示"（直接绑源集合无法真正冻结）；
 - 四维级联筛选（方向/类型/ID/PID）：用 `filterValueCounts` 计数 + "排除自身维度后是否匹配其他筛选"来生成候选值，最多 4 轮收敛；选项用增删/移动增量更新，避免清空导致 WPF 短暂 `null`；
 - 筛选选项重建用 `Dispatcher.BeginInvoke(Background)` 合并，避免逐条通知引发重建风暴；
 - 窗口关闭时 `SuspendUpdates()`，重新显示时与源集合重新同步（隐藏期间的 Add 被丢弃）；
 - code-behind 负责"自动跟随最新"+ `userHorizontalOffset` 保持横向滚动位置（`ScrollToEnd` 会重置 `HorizontalOffset`）。
+- **保存数据**（2026-10-23）：蓝色主按钮（`SaveDataCommand`）把当前**可见集合**快照导出为 Excel；`SaveFileDialog` 与提示留在 VM，构包与写文件全在 `CommunicationLogExcelExporter`（纯静态、无 WPF/无第三方库）。成功只写窗口底部状态行（`StatusMessage`，含条数与完整路径），失败弹 `MessageBox`；无数据时提示且不生成空文件。导出不影响采集、不清空记录，暂停时导出即冻结画面内容。
+  - **布局**：与筛选控件**同处一条工具条**——`DockPanel` 先声明 `DockPanel.Dock="Right"` 的按钮，筛选 `WrapPanel` 填充剩余宽度并在窄窗时自行换行。按钮不再单独占一行，工具条第 1 行（`Grid.Row=1`）高度从约 105 逻辑 px 回到约 28，列表可视高度恢复约 41 px。
+  - **样式**：`SaveDataButtonStyle` 由隐式 `Button` 样式派生，`MinHeight=28`（同行下拉框 26，仅高 2 px）、`FontSize=13`、`Padding=16,3`，并显式设 `BorderThickness=0` 与 `FocusVisualStyle={x:Null}`、自行覆盖 hover/pressed/disabled 三态背景。此前按钮四周出现 2 逻辑 px 纯黑描边，来源是默认按钮模板的边框与焦点视觉（`BorderBrush` 与背景同色本应不可见，但模板触发器/焦点装饰会改色），必须去掉这两项才彻底消失，只改颜色无效。
 
-#### 4.5.5 `FirmwareUpgradeViewModel`（21 行）+ `FirmwareUpgradeView.xaml`（54 行）
+#### 4.5.5 `FirmwareUpgradeViewModel`（629 行）+ `FirmwareUpgradeView.xaml`（231 行）+ `FirmwareContentWindow`
 
-2026-10-21 新增的页面框架，当前只承载标题栏与串口区，内容区域留空。
+2026-10-21 新增的页面，当前实现**固件文件加载、信息展示、十六进制预览与 OTA 第一至第十五步的启动**；复位已接入，复位后的启动验证仍由实机确认。
+2026-10-22 起十六进制预览**移入独立窗口** `FirmwareContentWindow`，主页面不再内联查看器卡片。
+2026-10-23 起 VM 保存加载时的 `FirmwareImage` 快照（`currentImage`）作为第十至第十四步范围、数据与 CRC32 的唯一来源；重新打开文件或重置查看器都会同步更新，避免用过期映像算范围。
+进度映射随步骤增补重排为：探测 0–18%、三版本 24/30/36%（当前第三、四步跳过，30/36 不命中，24 直接进 36–42）、再次确认 39–42%、会话 45/47%、Seed 50%、Key 53%、擦除 56%、下载申请 58%、逐块传输 58–96%（按已确认字节）、结束传输 97%、校验 98%、复位 99%、完成 100%；仅影响显示，不改变任何成功判据与计时。
 
 | 关注点 | 实现 |
 | --- | --- |
 | 串口连接保持 | 构造时注入主窗口共享的 `SerialSettings`，与执行器调试页**同一实例**；`connectionService` 在 `MainWindowViewModel` 级持有，切页不触碰 |
-| 页面结构 | 与执行器调试页一致的 `CardStyle` 标题栏：中文标题 + 英文副标题 + 连接状态芯片 + "串口设置"/"连接设备"按钮 |
-| 样式 | 沿用各视图自包含样式的既有组织方式，复制了所需的最小样式集；后续固件升级专属样式可独立演化，不影响调试页 |
+| 页面结构 | 标题栏卡（同调试页 `CardStyle`）+ 工具行（打开固件、文件内容按钮）+ 文件信息条（图标/文件名/格式/映像大小/CRC32/修改日期）+ 日志区（深色面板 + 进度占位 + 保存/清空日志）+ 底部操作行（NAD 输入框 + 配置 NAD / 开始升级） |
+| NAD 输入 | `NadText` 默认 `0x78`（与 `DeviceInformationService.DiagnosticNad` 同源）；`TryGetNad` 接受 `0x78` / `78` 十六进制写法、限单字节 0x00–0xFF，非法或为空回退默认并记 Warning；“配置 NAD”校验并规范化为 `0xXX`，“开始升级”发送前同样校验；OTA 传输接入后 NAD 组装统一经 `TryGetNad` 取值（`ReadVersionAsync` 已支持可选 `nad` 参数） |
+| 文件内容窗口 | 工具行“文件内容”按钮（`ShowContentCommand`，仅已加载固件时可用）弹出 `FirmwareContentWindow`：与主页面共享同一 `FirmwareUpgradeViewModel`，数据实时刷新；非模态 `Show()`，点关闭按钮即 `Close()` 销毁、不驻留后台；已打开时重复点击只 `Activate()` 唤到前台 |
+| 打开固件 | `OpenFirmwareCommand`：`OpenFileDialog`（筛选串取自 `FirmwareFileService.OpenFileDialogFilter`）→ `LoadAsync`；错误以 `FirmwareFileFormatException` 消息入日志（Error 级别），不弹异常 |
+| 数据流 | VM 只调用 `FirmwareFileService.LoadAsync` 并把 `FirmwareImage` 映射为显示属性；HEX 解析、CRC32、预览行构建全部在服务层（`IntelHexParser` / `FirmwareCrc32` / `FirmwareHexFormatter`），VM 不接触文件字节解析 |
+| 预览 | `FirmwareHexFormatter.BuildLines`：每行 16 字节，偏移（8 位十六进制）+ 十六进制 + ASCII；上限 1 MB（`MaxPreviewBytes`），超出记 Warning 日志；`ListBox` 开虚拟化 + 回收模式，行悬停高亮、无选中态 |
+| 复制/日志 | `CopyContentCommand` 把预览行拼为纯文本入剪贴板；页内日志 `ObservableCollection` 上限 500 条，`Run.Style + DataTrigger` 按级别着色 |
+| 样式 | 沿用各视图自包含样式的既有组织方式（全部在 `UserControl.Resources` 内定义），未抽取共享资源字典，不改动调试页 |
+| 开始升级 | `StartUpgradeCommand`（需固件已加载、串口已连接且无 OTA 在跑）→ `OtaUpgradeService.RunAsync(NAD, FirmwareImage)`：NAD 取页面输入框（默认 0x78），固件取 `currentImage` 快照；分步进展经 `StepReported` 切回 UI 线程写入日志（`OTA-1`…`OTA-15` 标签）并驱动进度条（第十二步按 `CompletedBytes/TotalBytes` 计算）；`NoticeReported` 只写非步骤提示（“设备处理中（NRC 78）”、第三/四步跳过说明），不改进度；**成功后不再追加任何汇总/待确认日志**（各步骤结果已由 `OTA-1`…`OTA-15` 逐条给出），只把进度置 100%、状态行写“十五步升级报文流程完成，设备已返回复位肯定响应”；失败只写一条“本次 OTA 结束于 <阶段>：<原因>” |
+| OTA 流程 | `OtaUpgradeService`（应用业务层，`架构/OTA升级流程.md` 第一至第十五步）：第一步 TesterPresent 连续三次在线确认（累计两败退出/间隔 1 s），第二步只读 APP（软件）版本（失败立即退出；第三、第四步的 Bootloader/硬件版本读取由 `ReadBootloaderAndHardwareVersions` 控制，默认 `false` 整步跳过、不发 `22 F1 80`/`22 F1 93`），第五步再次连续两次在线确认（计数独立初始化），第六步经 `DiagnosticSessionService` 发送 `10 03` 进入扩展诊断会话，第七步发送 `10 02` 进入编程会话，第八步经 `SecurityAccessService` 请求 `27 09` 取得四字节 Seed，第九步按中间件原式计算 Key 并发送 `27 0A`，第十步经 `EraseFlashService` 按固件映像的起始地址与长度发送 `31 01 FF 00`，第十一步经 `FirmwareDownloadService` 发送 `34 00 44` 并按 74 容量折算每包字节，第十二步按 `min(容量, 剩余)` 切片逐块发送 `36 + 块号 + 数据`（只认匹配块号的 76，块号 FE FF 00 01 回绕，片间最小间隔 `FrameGap = 20 ms`、块间等待 `BlockInterval = 10 ms` 且首块除外），第十三步全部确认后发送 `37` 并要求恰好 `77`，第十四步经 `FirmwareVerificationService` 发送 `31 01 02 02 + 地址 + 大小 + CRC32` 并按结果 00/01 判定，第十五步经 `EcuResetService` 发送两字节 `11 01` 并要求恰好 `51 01`（失败保留前序结果，不重发复位；`51 01` 不等于新固件已启动）；复位确认后等待 `ResetVersionDelay = 50 ms` 再读一次 APP 版本（`22 F1 95`），成功写入 `OtaResetOutcome.AppVersionAfterReset` 并显示在完成状态行，读不到只记 Warning、不判本次升级失败、不重试。报文与超时全部复用诊断协调层与版本读取服务，"完整 UDS 恰为 `7E 00`"在业务层判定；非 78 负响应把原始 UDS、NRC 与中文原因写入升级日志后退出，不重试、不弹窗；有效 NRC 78 由协调层续期并继续等待最终响应，业务层只转一条提示日志。独占经 `DiagnosticTransactionService.BeginOtaExclusiveHold/EndOtaExclusiveHoldAsync` 保持：多笔事务间队列清空不恢复应用帧。复位后的启动验证不自动化，由实机确认（§15.5） |
 | 路由 | `MainWindowViewModel.FirmwareUpgrade` + 菜单项 + `ContentControl.Resources` 中的 `DataTemplate` |
+
+数据模型（`Models/FirmwareImage.cs`）：`FirmwareImage`（格式/文件名/路径/大小/修改时间/映像字节/基地址/CRC32/HEX 摘要）、`IntelHexSummary`（记录数/数据字节数/最低最高地址/入口地址）、`HexPreviewLine`、`FirmwareLogLevel` / `FirmwareLogEntry`。
+
+HEX 解析要点（`Services/IntelHexParser.cs`，internal static 纯函数）：
+- 支持记录类型 00/01/02/04/05（02 段地址×16、04 线性地址×65536、05 入口地址），未知类型忽略（前向兼容）；
+- 逐行校验（冒号、偶数字符、合法十六进制、整行字节求和为 0、长度字段一致），失败抛带行号的 `FirmwareFileFormatException`；
+- 归一化映像：以最低数据地址为基地址，段间空洞填 `0xFF` 并统计填充量；同地址重复写入以最后一条为准；
+- EOF 之后的冗余行忽略；空行跳过；CRLF/LF 均可。
+
+BIN 路径：整文件即映像（基地址 0），CRC32 按文件内容；HEX 的 CRC32 按归一化映像计算（`FirmwareCrc32`，IEEE 802.3 查表实现）。文件读取与解析在 `Task.Run` 后台线程执行，不阻塞 UI。
 
 ---
 
@@ -916,8 +1054,8 @@ PID 计算：`P0 = ID0^ID1^ID2^ID4`，`P1 = ~(ID1^ID3^ID4^ID5)`，`PID = ID | P0
 10. 为 `Services` 关键类补接口（`IFrameChannel`、`IDiagnosticTransactionService`），提高可替换性。
 
 **长期（能力扩展）**
-11. 负响应 `7F` 结构化解析（NRC 语义、重试策略）；
-12. OTA/升级业务：批次独占生命周期（当前"队列清空即恢复应用通信"不适用于多事务升级）；
+11. 负响应 `7F` 后续扩展：`78` 已实现续期与续收；仍待 P2/P2* 实际应用、`78` 次数/整笔绝对上限策略、S3 保活；
+12. OTA/升级业务：复位后的启动验证（等待时长、探测方式、预期版本）未自动化；擦除完成判据、CRC32 两端一致性、下载重传/断点续传与零 Seed 的最终处理路径待设备确认（零 Seed 当前记日志退出）；会话保活（S3）与退出是否发 `10 01` 待协议确认；
 13. 主题化（资源字典 + 深色模式）、多语言（同时解决第 5 条根因）；
 14. CI：`dotnet build` + 测试 + 打包（含 self-contained 发布配置）。
 

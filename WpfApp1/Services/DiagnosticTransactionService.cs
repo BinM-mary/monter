@@ -13,6 +13,7 @@ namespace WpfApp1.Services;
 /// - 回显与响应在字节层同构，按阶段判定表处理，历史回显表保留到本笔结束；
 /// - 请求全部确认后进入固定回显隔离，隔离结束才 Reset＋BeginReceive 并启动 3D；
 /// - 失败按 §4.4.1 决定单笔失败或中止整批；跨事务归属门禁只在“可能仍有未归属数据”时关闭；
+/// - 有效负响应 7F + 原 SID + NRC 结构化保留（§6.4）；NRC 78 不结束本笔，按接收时刻续期响应窗口并继续接收最终响应（§6.5）；
 /// - 断线结束当前业务并清空排队诊断，不重放；应用退出/释放时同样终止等待者。
 /// </summary>
 public sealed class DiagnosticTransactionService : IDisposable
@@ -138,6 +139,12 @@ public sealed class DiagnosticTransactionService : IDisposable
 
         public long ResponseDeadline { get; set; }
 
+        /// <summary>
+        /// 本笔响应窗口长度（时间戳单位，§6.5）：SF 取 TotalDeadline、多帧取 ResponseBudget。
+        /// 有效 NRC 78 到达时以“接收时刻 + 该长度”替换当前截止，不另设绝对上限。
+        /// </summary>
+        public long ResponseWindow { get; set; }
+
         public long DrainEnd { get; set; }
 
         public long EchoFilterEnd { get; set; }
@@ -168,6 +175,18 @@ public sealed class DiagnosticTransactionService : IDisposable
         public bool ResponseVerified { get; set; }
 
         public byte[]? VerifiedResponse { get; set; }
+
+        /// <summary>已识别的完整负响应（7F + 原 SID + NRC）；由 <see cref="CompleteLocked"/> 写入失败结果（§6.4）。</summary>
+        public DiagnosticNegativeResponse? NegativeResponse { get; set; }
+
+        /// <summary>本笔已收到有效 NRC 78 的次数（§6.5）。</summary>
+        public int ResponsePendingCount { get; set; }
+
+        /// <summary>
+        /// 待派发的 78 续期提示：在 stateLock 内写入，接收入口释放锁后取走并触发事件，
+        /// 保证订阅方不在锁内回调。多帧首读暂存候选的重放路径不派发提示（不影响续期本身）。
+        /// </summary>
+        public DiagnosticResponsePendingNotice? PendingNotice { get; set; }
 
         public string? TpAbandonReason { get; set; }
 
@@ -234,10 +253,28 @@ public sealed class DiagnosticTransactionService : IDisposable
     private bool diagnosticGateClosed;
 
     /// <summary>
+    /// OTA 独占保持（架构/OTA升级流程.md §1.2、§1.6）：OTA 的多笔事务之间队列可能暂时清空，
+    /// 此时不得按既有策略恢复应用帧；由 OtaUpgradeService 在开始与结束时成对调用。
+    /// </summary>
+    private bool otaExclusiveHold;
+
+    /// <summary>
     /// 首个 3D 写入在途期间允许暂存的候选上限。数值在阶段 0 按中间件单次反馈契约定稿；
     /// 溢出不得无界扩容或静默成功，按归属异常终止（审查方案 §3.3-4）。
     /// </summary>
     private const int MaxPendingReadCandidates = 32;
+
+    /// <summary>UDS 负响应服务标识（架构/OTA升级流程.md §6.4）：完整消息为 7F + 原 SID + NRC。</summary>
+    private const byte NegativeResponseServiceId = 0x7F;
+
+    /// <summary>完整负响应的字节数：7F + 原服务号 + NRC（§6.4）。</summary>
+    private const int NegativeResponseLength = 3;
+
+    /// <summary>
+    /// 响应待定 NRC（§6.5）：请求已正确接收、最终响应稍后返回。
+    /// 收到后不结束本笔，按接收时刻续期响应窗口并继续接收最终响应。
+    /// </summary>
+    private const byte ResponsePendingNrc = 0x78;
 
     public DiagnosticTransactionService(
         LinFrameChannel channel,
@@ -268,6 +305,12 @@ public sealed class DiagnosticTransactionService : IDisposable
     /// </summary>
     public event Action<bool>? DiagnosticActivityChanged;
 
+    /// <summary>
+    /// 收到有效 NRC 78 并已续期响应窗口（§6.5）：仅作提示，不代表失败或成功。
+    /// 在接收线程、协调层锁外触发；订阅方异常不得影响接收与续期。
+    /// </summary>
+    public event Action<DiagnosticResponsePendingNotice>? ResponsePendingReceived;
+
     /// <summary>跨事务归属门禁是否已关闭；关闭期间新诊断返回 DiagnosticGateClosed（§4.4.2）。</summary>
     public bool IsDiagnosticBlocked
     {
@@ -277,6 +320,60 @@ public sealed class DiagnosticTransactionService : IDisposable
             {
                 return diagnosticGateClosed;
             }
+        }
+    }
+
+    /// <summary>
+    /// 开始 OTA 独占保持：与 <see cref="EndOtaExclusiveHoldAsync"/> 成对调用。
+    /// 保持期间多笔事务之间队列清空也不恢复应用帧，直到 OTA 显式释放（架构/OTA升级流程.md §1.2、§1.6）。
+    /// 重复调用幂等；不影响既有单笔诊断的排队与独占申请逻辑。
+    /// </summary>
+    public void BeginOtaExclusiveHold()
+    {
+        lock (stateLock)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            otaExclusiveHold = true;
+        }
+    }
+
+    /// <summary>
+    /// 释放 OTA 独占保持：队列已空时按既有策略退出诊断模式并恢复应用通信；
+    /// 断线时调度器不会恢复应用发送，不强行重放本次 OTA（§1.6.2、§11.5）。
+    /// </summary>
+    public async Task EndOtaExclusiveHoldAsync()
+    {
+        bool idle;
+        lock (stateLock)
+        {
+            otaExclusiveHold = false;
+            idle = !disposed && queue.Count == 0 && active is null;
+        }
+
+        if (!idle)
+        {
+            // 仍有在途或排队事务：由队列循环自身的收尾负责退出，避免两处重复恢复应用。
+            return;
+        }
+
+        try
+        {
+            await scheduler.ExitDiagnosticModeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+        }
+
+        bool stillIdle;
+        lock (stateLock)
+        {
+            stillIdle = queue.Count == 0 && active is null && !loopActive;
+        }
+
+        if (stillIdle)
+        {
+            DiagnosticActivityChanged?.Invoke(false);
         }
     }
 
@@ -645,11 +742,14 @@ public sealed class DiagnosticTransactionService : IDisposable
             // 只有仍是"当前"循环时才清理共享状态并恢复应用发送；
             // 若收尾期间新请求入队并启动了新循环（代次已推进），旧循环不得清掉新事务。
             var isCurrentLoop = false;
+            var otaHoldActive = false;
             lock (stateLock)
             {
                 if (loopGeneration == myGeneration)
                 {
                     isCurrentLoop = true;
+                    // 快照独占保持标志：后续 await 之后不再直接读共享字段。
+                    otaHoldActive = otaExclusiveHold;
                     loopActive = false;
 
                     // 兜底：循环退出时不应再有未交接的 entering 请求；若因异常路径遗留，
@@ -679,7 +779,9 @@ public sealed class DiagnosticTransactionService : IDisposable
 
             FlushDeferredRegistrations();
 
-            if (isCurrentLoop)
+            // OTA 独占保持期间不退出诊断模式：多笔事务之间队列会暂时清空，
+            // 恢复应用帧由 OtaUpgradeService 释放保持时统一执行（架构/OTA升级流程.md §1.2、§1.6）。
+            if (isCurrentLoop && !otaHoldActive)
             {
                 try
                 {
@@ -934,6 +1036,7 @@ public sealed class DiagnosticTransactionService : IDisposable
         {
             transaction.EchoDeadline = submitTime + ToTimestampUnits(timing.EchoWaitTimeout);
             transaction.ResponseDeadline = submitTime + ToTimestampUnits(timing.TotalDeadline);
+            transaction.ResponseWindow = ToTimestampUnits(timing.TotalDeadline);
         }
 
         // SF 保留原有行为：发送前启用接收上下文，回显与 3D 轮询并行。
@@ -974,6 +1077,7 @@ public sealed class DiagnosticTransactionService : IDisposable
             transaction.CurrentPhase = DiagnosticPhase.WaitingResponse;
             transaction.EchoDeadline = t0 + ToTimestampUnits(timing.EchoWaitTimeout);
             transaction.ResponseDeadline = t0 + ToTimestampUnits(timing.TotalDeadline);
+            transaction.ResponseWindow = ToTimestampUnits(timing.TotalDeadline);
 
             // 回显与响应都可能在写入任务返回前到达并已结束本笔；不得再启动轮询。
             if (transaction.Completed)
@@ -1161,6 +1265,7 @@ public sealed class DiagnosticTransactionService : IDisposable
             transaction.LastWriteComplete = lastComplete;
             transaction.DrainEnd = lastComplete + ToTimestampUnits(send.EchoDrainDuration);
             transaction.ResponseDeadline = lastComplete + ToTimestampUnits(response.ResponseBudget);
+            transaction.ResponseWindow = ToTimestampUnits(response.ResponseBudget);
             transaction.EchoFilterEnd = lastComplete + ToTimestampUnits(send.EchoToleranceAfterLastComplete);
             transaction.Phase = TransactionPhase.EchoDrain;
             transaction.CurrentPhase = DiagnosticPhase.EchoDrain;
@@ -1256,6 +1361,7 @@ public sealed class DiagnosticTransactionService : IDisposable
 
     private void HandleDiagnosticPacket(DiagnosticPacket packet)
     {
+        DiagnosticResponsePendingNotice? notice = null;
         lock (stateLock)
         {
             var transaction = active;
@@ -1268,10 +1374,33 @@ public sealed class DiagnosticTransactionService : IDisposable
             if (transaction.Plan.IsMultiFrame)
             {
                 HandleMultiFramePacketLocked(transaction, packet);
-                return;
+            }
+            else
+            {
+                HandleSingleFramePacketLocked(transaction, packet);
             }
 
-            HandleSingleFramePacketLocked(transaction, packet);
+            // 锁内只取走通知，事件在锁外触发，避免订阅方回调进入协调层锁（§6.5.4-5）。
+            notice = transaction.PendingNotice;
+            transaction.PendingNotice = null;
+        }
+
+        if (notice is not null)
+        {
+            RaiseResponsePending(notice);
+        }
+    }
+
+    /// <summary>在协调层锁外派发 78 续期提示；订阅方异常不影响接收流程（§6.5.4-5）。</summary>
+    private void RaiseResponsePending(DiagnosticResponsePendingNotice notice)
+    {
+        try
+        {
+            ResponsePendingReceived?.Invoke(notice);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
         }
     }
 
@@ -1329,7 +1458,10 @@ public sealed class DiagnosticTransactionService : IDisposable
             return;
         }
 
-        ApplyTpResult(transaction, transportProtocol.ProcessPdu(packet.Pdu, packet.ReceivedTimestamp));
+        ApplyTpResult(
+            transaction,
+            transportProtocol.ProcessPdu(packet.Pdu, packet.ReceivedTimestamp),
+            packet.ReceivedTimestamp);
     }
 
     /// <summary>多帧判定表（§4.5）：发送阶段只认回显，隔离期全部丢弃，响应阶段才允许进入 TP。</summary>
@@ -1412,7 +1544,7 @@ public sealed class DiagnosticTransactionService : IDisposable
                     return;
                 }
 
-                ApplyTpResult(transaction, transportProtocol.ProcessPdu(packet.Pdu, now));
+                ApplyTpResult(transaction, transportProtocol.ProcessPdu(packet.Pdu, now), now);
                 return;
         }
     }
@@ -1553,7 +1685,7 @@ public sealed class DiagnosticTransactionService : IDisposable
         }
     }
 
-    private void ApplyTpResult(ActiveTransaction transaction, TpReceiveResult tpResult)
+    private void ApplyTpResult(ActiveTransaction transaction, TpReceiveResult tpResult, long receivedTimestamp)
     {
         switch (tpResult.Outcome)
         {
@@ -1567,6 +1699,27 @@ public sealed class DiagnosticTransactionService : IDisposable
 
             case TpOutcome.MessageComplete:
                 var message = tpResult.Message!;
+
+                // 先分类负响应（§6.4）：完整消息为 7F + 原 SID + NRC，长度必须恰为 3，且原 SID 与本笔请求一致。
+                // 原 SID 不符或残缺的 7F 不按负响应处理，落到下面的前缀核对按响应不匹配失败，
+                // 不能借它刷新等待时间，也不能把它当成设备的有效拒绝结果。
+                if (message.Length == NegativeResponseLength
+                    && message[0] == NegativeResponseServiceId
+                    && message[1] == transaction.Plan.UdsRequest[0])
+                {
+                    if (message[2] == ResponsePendingNrc)
+                    {
+                        // 响应待定：不结束本笔、不发布失败，续期后继续接收最终响应（§6.5）。
+                        AcceptResponsePendingLocked(transaction, message, receivedTimestamp);
+                        return;
+                    }
+
+                    transaction.NegativeResponse = new DiagnosticNegativeResponse(
+                        message[1], message[2], [.. message]);
+                    CompleteLocked(transaction, DiagnosticFailureReason.NegativeResponse);
+                    return;
+                }
+
                 var prefix = transaction.Plan.ExpectedResponsePrefix;
                 if (message.Length < prefix.Length
                     || !message.AsSpan(0, prefix.Length).SequenceEqual(prefix))
@@ -1592,6 +1745,50 @@ public sealed class DiagnosticTransactionService : IDisposable
                 scheduler.StopResponsePolling();
                 return;
         }
+    }
+
+    /// <summary>
+    /// 接受一条有效 NRC 78（§6.5）：保持本笔活动，按该条响应的实际接收时刻续期响应窗口，
+    /// 重新准备接收最终响应，并同步延长调度器 3D 轮询截止。
+    /// 只处理仍活动、未核对最终正响应、且已通过长度/NAD/校验/原 SID/截止检查的完整 78；
+    /// 不重发 3C、不重新提交事务、不推进计数。
+    /// </summary>
+    private void AcceptResponsePendingLocked(
+        ActiveTransaction transaction,
+        byte[] message,
+        long receivedTimestamp)
+    {
+        if (transaction.Completed || transaction.ResponseVerified)
+        {
+            // 最终正响应已核对、只等回显时，78 不再续期；回显窗口独立，不因 78 延长（§6.5.3）。
+            return;
+        }
+
+        var window = transaction.ResponseWindow > 0
+            ? transaction.ResponseWindow
+            : ToTimestampUnits(DiagnosticTiming.Default.TotalDeadline);
+
+        transaction.ResponseDeadline = receivedTimestamp + window;
+        transaction.ResponsePendingCount++;
+
+        // TP 在本条 SF 收齐后已进入 Completed，必须重新准备接收；不清空串口共享缓存，
+        // 因此同一字节块内紧跟的最终响应仍能依次进入（§6.5.4-2）。
+        var consecutiveFrameTimeout = transaction.Plan.IsMultiFrame
+            ? transaction.Plan.MultiFrame!.Response.ConsecutiveFrameTimeout
+            : transaction.Plan.SfTiming!.ConsecutiveFrameTimeout;
+        transportProtocol.BeginReceive(transaction.Plan.Nad, consecutiveFrameTimeout);
+
+        // 3D 继续按原节拍发送，只把硬截止换成新值；不重锚、不补发（§6.5.3）。
+        scheduler.ExtendResponsePollingDeadline(transaction, transaction.ResponseDeadline);
+
+        transaction.PendingNotice = new DiagnosticResponsePendingNotice
+        {
+            Nad = transaction.Plan.Nad,
+            RequestServiceId = message[1],
+            Nrc = message[2],
+            PendingCount = transaction.ResponsePendingCount,
+            WaitWindow = timeProvider.GetElapsedTime(receivedTimestamp, transaction.ResponseDeadline)
+        };
     }
 
     private void InspectTimerCallback(object? state)
@@ -1697,7 +1894,8 @@ public sealed class DiagnosticTransactionService : IDisposable
         var progress = BuildProgress(transaction);
         var result = response is not null
             ? DiagnosticResult.Succeeded(response, progress, transaction.TpAbandonReason)
-            : DiagnosticResult.Failed(reason, transaction.TpAbandonReason, progress);
+            : DiagnosticResult.Failed(
+                reason, transaction.TpAbandonReason, progress, transaction.NegativeResponse);
 
         // 先发布结果再标记完成，避免无锁读取看到“已完成但结果为 null”。
         transaction.PublishedResult = result;
@@ -1726,9 +1924,11 @@ public sealed class DiagnosticTransactionService : IDisposable
 
     private void ApplyBatchPolicyLocked(ActiveTransaction transaction, DiagnosticFailureReason reason)
     {
-        if (reason is DiagnosticFailureReason.None or DiagnosticFailureReason.ResponseMismatch)
+        if (reason is DiagnosticFailureReason.None
+            or DiagnosticFailureReason.ResponseMismatch
+            or DiagnosticFailureReason.NegativeResponse)
         {
-            // 完整响应但不匹配（含 7F）：这是"设备拒绝"，不是"来路不明"，继续 FIFO。
+            // 完整响应但不匹配（含 7F 负响应与负响应本身）：这是"设备拒绝"，不是"来路不明"，继续 FIFO。
             return;
         }
 

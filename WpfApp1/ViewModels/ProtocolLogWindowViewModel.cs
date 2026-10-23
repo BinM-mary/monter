@@ -1,10 +1,12 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Windows;
 using System.Windows.Data;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Win32;
 using WpfApp1.Models;
 using WpfApp1.Services;
 
@@ -92,6 +94,10 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(PauseButtonText))]
     private bool isPaused;
+
+    /// <summary>窗口底部状态行：保存结果提示，成功后显示条数与路径，不弹模态框打断观察。</summary>
+    [ObservableProperty]
+    private string? statusMessage;
 
     public string PauseButtonText => IsPaused ? "继续显示" : "暂停显示";
 
@@ -192,6 +198,56 @@ public sealed partial class ProtocolLogWindowViewModel : ObservableObject, IDisp
 
             pausedPendingEntries.Clear();
             RefreshFilteredEntries();
+        }
+    }
+
+    /// <summary>
+    /// 保存数据：把当前显示（经筛选、暂停生效时即冻结画面）的报文另存为 Excel 工作簿。
+    /// 导出的是当前可见集合的快照：不清空、不改动、不影响后台记录与后续采集；
+    /// 无数据时只提示、不生成空文件；写文件失败保留原状态并在状态行与提示框说明原因。
+    /// </summary>
+    [RelayCommand]
+    private void SaveData()
+    {
+        var entries = filteredEntries.Cast<CommunicationLogEntry>().ToList();
+        if (entries.Count == 0)
+        {
+            MessageBox.Show(
+                "当前没有可保存的报文。",
+                "保存数据",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            Title = "保存报文数据",
+            FileName = $"报文_{DateTime.Now:yyyyMMdd_HHmmss}",
+            Filter = "Excel 工作簿 (*.xlsx)|*.xlsx",
+            DefaultExt = CommunicationLogExcelExporter.FileExtension,
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            CommunicationLogExcelExporter.Export(dialog.FileName, entries);
+            StatusMessage = $"已保存 {entries.Count} 条报文到 {dialog.FileName}";
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = "保存失败，原记录未受影响。";
+            MessageBox.Show(
+                $"保存报文数据失败：{exception.Message}",
+                "保存数据",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
     }
 

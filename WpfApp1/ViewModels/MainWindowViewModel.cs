@@ -8,6 +8,13 @@ namespace WpfApp1.ViewModels;
 
 public partial class MainWindowViewModel : ObservableObject, IDisposable
 {
+    /// <summary>
+    /// 应用帧（0x15/0x33/0x34）总开关，仅用于现场测试：
+    /// false = 连接后总线不发任何应用帧（诊断与 OTA 照常工作），true = 正常 100 ms 应用拍。
+    /// 临时静默总线时改为 false 并重新编译；测试完成后改回 true 即可，无其他改动。
+    /// </summary>
+    private const bool EnableApplicationFrames = true;
+
     private readonly SerialPortConnectionService connectionService;
 
     public MainWindowViewModel()
@@ -45,16 +52,35 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             FrameChannel,
             MotorCommands,
             timeProvider: TimeProvider.System);
+        // 测试开关：关闭时连接后一帧应用帧都不发，诊断/OTA 不受影响（见 EnableApplicationFrames）。
+        BusScheduler.ApplicationFramesEnabled = EnableApplicationFrames;
         // 诊断事务协调层：同一总线串行执行，3C 回显核对、超时与统一收尾。
         Diagnostics = new DiagnosticTransactionService(
             FrameChannel,
             BusScheduler,
             TimeProvider.System);
         DeviceInfo = new DeviceInformationService(Diagnostics);
+        // 诊断会话控制（架构/OTA升级流程.md 第六、七步）：只构造 10 03/10 02 与判定正响应格式，不自行调度串口。
+        SessionControl = new DiagnosticSessionService(Diagnostics);
+        // 安全访问业务（第八、九步）：构造 27 09/27 0A、判定正响应格式并计算 Key，不缓存 Seed/Key。
+        SecurityAccess = new SecurityAccessService(Diagnostics);
+        // 擦除业务（第十步）：构造 31 01 FF 00 + 起始地址 + 长度，多帧发送与 3D 轮询复用协调层。
+        EraseFlash = new EraseFlashService(Diagnostics);
+        // 下载业务（第十一至第十三步）：构造 34/36/37 并解析 74/76/77，不保存块偏移、不自行重传。
+        FirmwareDownload = new FirmwareDownloadService(Diagnostics);
+        // 固件校验业务（第十四步）：构造 31 01 02 02 + 地址 + 大小 + CRC32，解析 71 01 02 02 + 结果。
+        FirmwareVerification = new FirmwareVerificationService(Diagnostics);
+        // 设备复位业务（第十五步）：构造 11 01，只认恰好 2 字节 51 01；不重发、不自动重连。
+        EcuReset = new EcuResetService(Diagnostics);
+        // OTA 升级流程编排（架构/OTA升级流程.md 第一至第十五步）：复用同一诊断协调层、版本读取、会话、
+        // 安全访问、擦除、下载、校验与复位服务，不新增发送出口；固件升级页通过它执行 OTA。
+        OtaUpgrade = new OtaUpgradeService(
+            Diagnostics, DeviceInfo, SessionControl, SecurityAccess, EraseFlash,
+            FirmwareDownload, FirmwareVerification, EcuReset, TimeProvider.System);
         ActuatorDebug = new ActuatorDebugViewModel(SerialSettings, MotorCommands, DeviceInfo, Diagnostics);
         // 固件升级页与执行器调试页共享同一 SerialSettings 实例：
         // 串口连接状态由主窗口级服务持有，页面切换不重置、不断开。
-        FirmwareUpgrade = new FirmwareUpgradeViewModel(SerialSettings);
+        FirmwareUpgrade = new FirmwareUpgradeViewModel(SerialSettings, OtaUpgrade);
         FrameChannel.FrameReceived += HandleStatusFrameReceived;
 
         MenuItems = new ObservableCollection<MenuItemViewModel>
@@ -81,6 +107,20 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public DiagnosticTransactionService Diagnostics { get; }
 
     public DeviceInformationService DeviceInfo { get; }
+
+    public DiagnosticSessionService SessionControl { get; }
+
+    public SecurityAccessService SecurityAccess { get; }
+
+    public EraseFlashService EraseFlash { get; }
+
+    public FirmwareDownloadService FirmwareDownload { get; }
+
+    public FirmwareVerificationService FirmwareVerification { get; }
+
+    public EcuResetService EcuReset { get; }
+
+    public OtaUpgradeService OtaUpgrade { get; }
 
     public MotorCommandService MotorCommands { get; }
 

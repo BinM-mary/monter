@@ -64,7 +64,9 @@ public enum DiagnosticFailureReason
     /// <summary>3C 串口写入失败（非断线）。</summary>
     RequestWriteFailed,
 
-    /// <summary>完整响应的服务号/DID 与预期前缀不匹配（§15.1；负响应 7F 也按此报告）。</summary>
+    /// <summary>
+    /// 完整响应的服务号/DID 与预期前缀不匹配（§15.1）；残缺负响应或原 SID 不符的 7F 也按此报告。
+    /// </summary>
     ResponseMismatch,
 
     /// <summary>原 SF 路径 t0 + 5 s 总截止（§10）；多帧不复用该值隐藏失败阶段。</summary>
@@ -101,7 +103,130 @@ public enum DiagnosticFailureReason
     DiagnosticGateClosed,
 
     /// <summary>长度、必填多帧选项或参数组合非法，发送前拒绝（实施计划 §4.9.2）。</summary>
-    InvalidRequest
+    InvalidRequest,
+
+    /// <summary>
+    /// 设备返回完整负响应 7F + 原 SID + NRC（架构/OTA升级流程.md §6.4）。
+    /// 原始 UDS、原服务号与 NRC 由 <see cref="DiagnosticResult.NegativeResponse"/> 携带；
+    /// 本值仅追加在末尾，不改变既有枚举编号。
+    /// </summary>
+    NegativeResponse
+}
+
+/// <summary>
+/// 一条完整的 UDS 负响应 7F + 原服务号 + NRC（架构/OTA升级流程.md §6.4）：
+/// 保留原请求 SID、NRC 与原始字节，未知 NRC 也保留数值，不丢数据、不虚构含义。
+/// </summary>
+public sealed class DiagnosticNegativeResponse
+{
+    public DiagnosticNegativeResponse(byte requestServiceId, byte nrc, byte[] rawUds)
+    {
+        RequestServiceId = requestServiceId;
+        Nrc = nrc;
+        RawUds = rawUds ?? throw new ArgumentNullException(nameof(rawUds));
+    }
+
+    /// <summary>被拒绝或待处理的原请求服务号（进入扩展会话时为 0x10）。</summary>
+    public byte RequestServiceId { get; }
+
+    /// <summary>负响应码 NRC（第三个字节），不是原请求服务号，也不等于 NAD。</summary>
+    public byte Nrc { get; }
+
+    /// <summary>完整 UDS 负响应原始字节（7F + 原 SID + NRC），不含 NAD、PCI、填充与 LIN 校验。</summary>
+    public byte[] RawUds { get; }
+
+    /// <summary>原始 UDS 的十六进制文本，例如 7F 10 22。</summary>
+    public string RawUdsText => BitConverter.ToString(RawUds).Replace('-', ' ');
+
+    /// <summary>NRC 数值与中文原因，例如 NRC=0x22，执行条件不满足。</summary>
+    public string NrcText => DiagnosticNrcText.Describe(Nrc);
+
+    /// <summary>日志用的一行说明：原始 UDS + NRC 数值与中文原因，例如 7F 10 22；NRC=0x22，执行条件不满足。</summary>
+    public string Describe() => $"{RawUdsText}；{NrcText}";
+}
+
+/// <summary>
+/// 收到有效 NRC 0x78（响应待定）并已续期响应窗口后的提示信息（架构/OTA升级流程.md §6.5）。
+/// 只用于日志提示，不是失败结果，也不改变调用方等待：事务仍在同一次 <c>ExecuteAsync</c> 内继续等待最终响应。
+/// </summary>
+public sealed record DiagnosticResponsePendingNotice
+{
+    /// <summary>本次 OTA/诊断的目标 NAD（与 NRC 0x78 不是同一个概念）。</summary>
+    public required byte Nad { get; init; }
+
+    /// <summary>被待处理的原请求服务号，例如扩展会话的 0x10。</summary>
+    public required byte RequestServiceId { get; init; }
+
+    /// <summary>负响应码，恒为 0x78。</summary>
+    public required byte Nrc { get; init; }
+
+    /// <summary>本笔第几次收到有效 78（从 1 开始，供日志合并与排查）。</summary>
+    public required int PendingCount { get; init; }
+
+    /// <summary>本次刷新后的响应等待窗口长度（默认配置下为 5 s，取自本笔时间参数）。</summary>
+    public required TimeSpan WaitWindow { get; init; }
+
+    /// <summary>原始 UDS 的十六进制文本，例如 7F 10 78。</summary>
+    public string RawUdsText => $"7F {RequestServiceId:X2} {Nrc:X2}";
+
+    /// <summary>NRC 数值与中文原因，例如 NRC=0x78，请求已正确接收，最终响应待定。</summary>
+    public string NrcText => DiagnosticNrcText.Describe(Nrc);
+}
+
+/// <summary>
+/// NRC 的中文说明（架构/OTA升级流程.md §6.4 建议的统一映射）：
+/// 供 OTA 升级日志与版本读取失败文案复用，未知 NRC 仍显示数值。
+/// </summary>
+public static class DiagnosticNrcText
+{
+    public static string Describe(byte nrc) => nrc switch
+    {
+        0x11 => "NRC=0x11，服务不支持",
+        0x12 => "NRC=0x12，子功能不支持",
+        0x13 => "NRC=0x13，消息长度错误或格式无效",
+        0x21 => "NRC=0x21，设备忙，请求需稍后重试",
+        0x22 => "NRC=0x22，执行条件不满足",
+        0x24 => "NRC=0x24，请求顺序错误",
+        0x31 => "NRC=0x31，请求参数超出范围",
+        0x33 => "NRC=0x33，安全访问被拒绝",
+        0x35 => "NRC=0x35，密钥无效",
+        0x36 => "NRC=0x36，超过允许的尝试次数",
+        0x37 => "NRC=0x37，要求的等待时间尚未结束",
+        0x70 => "NRC=0x70，上传/下载请求不被接受",
+        0x73 => "NRC=0x73，数据块序号错误",
+        // 响应待定：由协调层续期响应窗口并继续接收最终响应（§6.5），不按失败退出。
+        0x78 => "NRC=0x78，请求已正确接收，最终响应待定",
+        0x7E => "NRC=0x7E，当前会话不支持该子功能",
+        _ => $"NRC=0x{nrc:X2}，未知负响应"
+    };
+}
+
+/// <summary>
+/// 诊断失败原因的界面文案（§11.4）：供设备版本读取与 OTA 流程共用，避免同一枚举在多处各写一套文本。
+/// </summary>
+public static class DiagnosticFailureText
+{
+    public static string Describe(DiagnosticFailureReason reason) => reason switch
+    {
+        DiagnosticFailureReason.EchoTimeout => "未收到 3C 回显",
+        DiagnosticFailureReason.RequestWriteFailed => "诊断请求发送失败",
+        DiagnosticFailureReason.RequestWriteTimeout => "诊断请求写入超时",
+        DiagnosticFailureReason.ResponseMismatch => "设备响应与预期不符",
+        DiagnosticFailureReason.DeadlineExceeded => "等待设备响应超时",
+        DiagnosticFailureReason.ResponseDeadlineExceeded => "等待设备响应超时",
+        DiagnosticFailureReason.SendDeadlineExceeded => "诊断请求发送超时",
+        DiagnosticFailureReason.InterFrameDeadlineExceeded => "诊断分片间隔超限",
+        DiagnosticFailureReason.ProtocolAttributionError => "诊断响应归属异常",
+        DiagnosticFailureReason.Cancelled => "诊断已取消",
+        DiagnosticFailureReason.QueueAborted => "诊断已中止",
+        DiagnosticFailureReason.DiagnosticGateClosed => "诊断已锁止，需复位或重启",
+        DiagnosticFailureReason.InvalidRequest => "诊断请求参数非法",
+        DiagnosticFailureReason.NegativeResponse => "设备返回负响应",
+        DiagnosticFailureReason.Disconnected => "串口已断开",
+        DiagnosticFailureReason.Shutdown => "诊断已终止",
+        // 未知未来枚举保留兜底，但显示原因标识，避免掩盖已知值遗漏（实施计划 §4.9.2）。
+        _ => $"读取失败（{reason}）"
+    };
 }
 
 /// <summary>事务阶段，用于进度快照与 FailedPhase 断言；不使用自由文本阶段名（实施计划 §4.9.1）。</summary>
@@ -167,7 +292,8 @@ public sealed record DiagnosticProgress
 
 /// <summary>
 /// 一笔诊断业务的最终结果（只发布一次，§11.4）。
-/// 失败时可附带 TP 记录的重组放弃原因，供内部排查；与报文窗口显示分开（§7.4）。
+/// 失败时可附带 TP 记录的重组放弃原因与设备负响应原始数据，供内部排查与业务提示；
+/// 与报文窗口显示分开（§7.4）。
 /// </summary>
 public sealed class DiagnosticResult
 {
@@ -176,13 +302,15 @@ public sealed class DiagnosticResult
         byte[]? response,
         DiagnosticFailureReason reason,
         string? tpAbandonReason,
-        DiagnosticProgress progress)
+        DiagnosticProgress progress,
+        DiagnosticNegativeResponse? negativeResponse)
     {
         Success = success;
         Response = response;
         Reason = reason;
         TpAbandonReason = tpAbandonReason;
         Progress = progress;
+        NegativeResponse = negativeResponse;
     }
 
     public bool Success { get; }
@@ -191,6 +319,9 @@ public sealed class DiagnosticResult
     public byte[]? Response { get; }
 
     public DiagnosticFailureReason Reason { get; }
+
+    /// <summary>设备负响应（7F + 原 SID + NRC）；不是负响应失败时为 null。</summary>
+    public DiagnosticNegativeResponse? NegativeResponse { get; }
 
     public string? TpAbandonReason { get; }
 
@@ -201,13 +332,15 @@ public sealed class DiagnosticResult
         byte[] response,
         DiagnosticProgress? progress = null,
         string? tpAbandonReason = null) =>
-        new(true, response, DiagnosticFailureReason.None, tpAbandonReason, progress ?? DiagnosticProgress.Empty);
+        new(true, response, DiagnosticFailureReason.None, tpAbandonReason,
+            progress ?? DiagnosticProgress.Empty, null);
 
     public static DiagnosticResult Failed(
         DiagnosticFailureReason reason,
         string? tpAbandonReason = null,
-        DiagnosticProgress? progress = null) =>
-        new(false, null, reason, tpAbandonReason, progress ?? DiagnosticProgress.Empty);
+        DiagnosticProgress? progress = null,
+        DiagnosticNegativeResponse? negativeResponse = null) =>
+        new(false, null, reason, tpAbandonReason, progress ?? DiagnosticProgress.Empty, negativeResponse);
 }
 
 public enum TpOutcome
