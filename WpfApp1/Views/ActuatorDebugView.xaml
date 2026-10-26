@@ -122,17 +122,17 @@
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Text="目标位置" Style="{StaticResource FieldLabelStyle}" />
                                         <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
-                                            <Slider Minimum="{Binding NegativeLimitSteps}"
-                                                    Maximum="{Binding TotalTravelSteps}"
-                                                    Value="{Binding TargetPositionSteps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            <Slider Minimum="{Binding SliderMinimumSteps}"
+                                                    Maximum="{Binding SliderMaximumSteps}"
+                                                    Value="{Binding TargetPositionSliderValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                     IsEnabled="{Binding IsMotorCommandAvailable}"
                                                     VerticalAlignment="Center" />
                                             <Grid Margin="0,-2,0,0">
-                                                <TextBlock Text="{Binding NegativeLimitSteps, StringFormat={}最小 {0} step}"
+                                                <TextBlock Text="{Binding SliderMinimumSteps, StringFormat={}最小 {0} step}"
                                                            FontSize="11"
                                                            Foreground="#6B6B6B"
                                                            VerticalAlignment="Center" />
-                                                <TextBlock Text="{Binding TotalTravelSteps, StringFormat={}最大 {0} step}"
+                                                <TextBlock Text="{Binding SliderMaximumSteps, StringFormat={}最大 {0} step}"
                                                            FontSize="11"
                                                            Foreground="#6B6B6B"
                                                            HorizontalAlignment="Right"
@@ -142,7 +142,10 @@
                                         <Border Grid.Column="2" Style="{StaticResource CompactFieldStyle}" Margin="0,0,8,0">
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="38" /></Grid.ColumnDefinitions>
-                                                <TextBox Text="{Binding TargetPositionSteps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding IsMotorCommandAvailable}" Style="{StaticResource CompactFieldTextBoxStyle}" />
+                                                <TextBox Text="{Binding TargetPositionText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                         IsEnabled="{Binding IsMotorCommandAvailable}"
+                                                         ToolTip="可输入 0～65535 step；超过 16 bit 上限时不会下发"
+                                                         Style="{StaticResource CompactFieldTextBoxStyle}" />
                                                 <Border Grid.Column="1" Background="#F5F5F5" BorderBrush="#E0E0E0" BorderThickness="1,0,0,0">
                                                     <TextBlock Text="step" Foreground="#5C5C5C" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Center" />
                                                 </Border>

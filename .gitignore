@@ -7,6 +7,9 @@
 **/bin/
 **/obj/
 
+# 本地发布产物（publish 目录与打包 zip）
+release/
+
 # 本地日志与临时文件
 *.log
 *.tmp

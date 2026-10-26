@@ -12,6 +12,13 @@ namespace WpfApp1.ViewModels;
 public partial class ActuatorDebugViewModel : ObservableObject
 {
     private const int DefaultTotalTravelSteps = 12_000;
+
+    /// <summary>
+    /// 目标位置输入上限：0x15 帧的目标位置是 16 bit 无符号（协议/PROTOCOL.md §5.2），
+    /// 所以输入框允许 0～65535 的较大步数，不再按设备回报的行程值截断用户输入。
+    /// </summary>
+    public const int MaxTargetPositionSteps = ushort.MaxValue;
+
     private static readonly MotorPresetConfigurationItem[] DefaultPresets =
     [
         new() { Id = "open25", PositionSteps = 3_000 },
@@ -85,6 +92,14 @@ public partial class ActuatorDebugViewModel : ObservableObject
     [ObservableProperty]
     private int targetPositionSteps;
 
+    /// <summary>
+    /// 目标位置输入框的原始文本。输入框不直接绑定 <see cref="TargetPositionSteps"/>：
+    /// 超过 16 bit 上限（65535）或非数字的输入会原样保留，由"确定"统一提示并拒绝下发，
+    /// 避免绑定层把 70000 静默改成 65535、或把无法解析的文本悄悄退回旧值。
+    /// </summary>
+    [ObservableProperty]
+    private string targetPositionText = "0";
+
     // 当前位置由 0x33 回复绑定（字节 0-1），无符号 step。
     [ObservableProperty]
     private int currentPositionSteps;
@@ -94,7 +109,38 @@ public partial class ActuatorDebugViewModel : ObservableObject
     private bool hasCurrentPosition;
 
     public string CurrentPositionSummary =>
-        $"当前： {Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps)} step";
+        $"当前： {Math.Clamp(CurrentPositionSteps, 0, SliderMaximumSteps)} step";
+
+    /// <summary>
+    /// 滑块范围上限：设备回报的行程（与正/负极限取大者），至少为 1，
+    /// 避免范围长度为 0 时滑块无法拖动、也不再出现"最小 &gt; 最大"的非法范围。
+    /// </summary>
+    public int SliderMaximumSteps => Math.Max(1, Math.Max(TotalTravelSteps, NegativeLimitSteps));
+
+    /// <summary>
+    /// 滑块范围下限：设备回报的负极限，收敛到 [0, 上限]。
+    /// 设备若把负极限按补码回报（例如 -224 报成 0xFF20 = 65312），这里按 0 兜底显示。
+    /// </summary>
+    public int SliderMinimumSteps => Math.Clamp(NegativeLimitSteps, 0, SliderMaximumSteps);
+
+    /// <summary>
+    /// 滑块当前位置：只把目标位置收敛到滑块范围用于显示，<b>不回写</b>目标位置。
+    /// 这样输入框里收到的较大步数（如 65312）不会被滑块范围吞掉，也避免 RangeBase 出现 Value &gt; Maximum 的中间态。
+    /// </summary>
+    public int TargetPositionSliderValue
+    {
+        get => Math.Clamp(TargetPositionSteps, SliderMinimumSteps, SliderMaximumSteps);
+        set
+        {
+            if (value == TargetPositionSteps)
+            {
+                return;
+            }
+
+            TargetPositionSteps = value;
+            OnPropertyChanged();
+        }
+    }
 
     [ObservableProperty]
     private bool isPresetConfigurationOpen;
@@ -338,10 +384,16 @@ public partial class ActuatorDebugViewModel : ObservableObject
         CurrentPositionSteps = status.CurrentPositionSteps;
         HasCurrentPosition = true;
 
-        // 正/负极限与目标位置绑定：滑块范围与 step 输入钳制使用 [负极限, 正极限]。
-        // 负极限大于正极限属于异常配置，以较大值作为上限避免钳制异常。
-        NegativeLimitSteps = status.NegativeLimitSteps;
-        TotalTravelSteps = Math.Max(status.PositiveLimitSteps, status.NegativeLimitSteps);
+        // 行程与负极限先行规范化：设备可能把负极限按补码回报（-224 报成 0xFF20 = 65312），
+        // 这种值不能直接当作上界，否则界面会出现“最小 > 最大”的非法区间。
+        // 判据：负极限不超过正极限才认为区间有效；无效时负极限退回 0，行程取正极限。
+        var positiveLimitSteps = (int)status.PositiveLimitSteps;
+        var negativeLimitSteps = (int)status.NegativeLimitSteps;
+        var rangeIsUsable = negativeLimitSteps <= positiveLimitSteps;
+        var reportedTravelSteps = rangeIsUsable ? Math.Max(positiveLimitSteps, negativeLimitSteps) : positiveLimitSteps;
+
+        TotalTravelSteps = reportedTravelSteps > 0 ? reportedTravelSteps : DefaultTotalTravelSteps;
+        NegativeLimitSteps = Math.Clamp(rangeIsUsable ? negativeLimitSteps : 0, 0, TotalTravelSteps);
 
         switch (status.InitializationState)
         {
@@ -560,7 +612,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
                 preset.Id,
                 preset.DisplayName,
                 preset.PositionSteps,
-                TotalTravelSteps));
+                MaxTargetPositionSteps));
         }
 
         PresetConfigurationMessage = string.Empty;
@@ -577,6 +629,14 @@ public partial class ActuatorDebugViewModel : ObservableObject
     [RelayCommand]
     private void SavePresetConfiguration()
     {
+        // 输入框允许自由输入，但保存前必须逐项确认落在 0～65535：超出上限的值不会被静默改写成 65535。
+        var invalidPreset = EditablePresets.FirstOrDefault(preset => preset.PositionInputError is not null);
+        if (invalidPreset is not null)
+        {
+            PresetConfigurationMessage = $"{invalidPreset.DisplayName}：{invalidPreset.PositionInputError}";
+            return;
+        }
+
         var configuration = EditablePresets
             .Select(preset => preset.ToConfigurationItem())
             .ToArray();
@@ -615,7 +675,7 @@ public partial class ActuatorDebugViewModel : ObservableObject
         }
 
         var originalPosition = preset.PositionSteps;
-        var position = Math.Clamp(CurrentPositionSteps, 0, TotalTravelSteps);
+        var position = Math.Clamp(CurrentPositionSteps, 0, MaxTargetPositionSteps);
         preset.PositionSteps = position;
 
         var configuration = sourcePresets
@@ -643,9 +703,19 @@ public partial class ActuatorDebugViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(IsMotorCommandAvailable))]
     private void ConfirmTargetPosition()
     {
-        var position = (ushort)Math.Clamp(TargetPositionSteps, 0, ushort.MaxValue);
-        motorCommands.SetMoveToPosition(position);
-        ShowDeviceInfoReadNotification($"已下发目标位置：{position} step");
+        // 超出 16 bit 上限（65535）不截断后下发：0x15 只有 2 字节位置字段，
+        // 硬发会让 70000 之类回绕成 4464 这样的完全不同的位置，宁可拒绝并说明原因。
+        if (!TryParseTargetPositionText(TargetPositionText, out var position))
+        {
+            ShowDeviceInfoReadNotification(DescribeTargetPositionInputError(TargetPositionText));
+            return;
+        }
+
+        motorCommands.SetMoveToPosition((ushort)position);
+        // 超出行程只做提示，不拦截：较大步数值仍然照原样下发（0x15 目标位置为 16 bit 无符号）。
+        ShowDeviceInfoReadNotification(position > TotalTravelSteps
+            ? $"已下发目标位置：{position} step（超出行程 {TotalTravelSteps} step）"
+            : $"已下发目标位置：{position} step");
     }
 
     [RelayCommand(CanExecute = nameof(IsMotorCommandAvailable))]
@@ -701,22 +771,86 @@ public partial class ActuatorDebugViewModel : ObservableObject
     partial void OnTotalTravelStepsChanged(int value)
     {
         OnPropertyChanged(nameof(CurrentPositionSummary));
-        // 正极限变化后，目标位置可能超出新的合法范围，触发一次钳制。
-        TargetPositionSteps = Math.Clamp(TargetPositionSteps, NegativeLimitSteps, value);
+        NotifySliderRangeChanged();
     }
 
     partial void OnNegativeLimitStepsChanged(int value)
     {
-        TargetPositionSteps = Math.Clamp(TargetPositionSteps, value, TotalTravelSteps);
+        NotifySliderRangeChanged();
+    }
+
+    partial void OnTargetPositionTextChanged(string value)
+    {
+        // 只有能解析且落在协议范围内的输入才实时同步到目标位置（滑块随之移动）；
+        // 超限/非法文本原样保留，等"确定"时统一提示，不在输入过程中改写用户输入。
+        if (TryParseTargetPositionText(value, out var position))
+        {
+            TargetPositionSteps = position;
+        }
     }
 
     partial void OnTargetPositionStepsChanged(int value)
     {
-        var normalizedValue = Math.Clamp(value, NegativeLimitSteps, TotalTravelSteps);
+        // 输入框只受 16 bit 协议上限约束：设备回报的行程仅作参考，
+        // 不再把用户输入的较大步数强制改写成行程值。
+        var normalizedValue = Math.Clamp(value, 0, MaxTargetPositionSteps);
         if (normalizedValue != value)
         {
             TargetPositionSteps = normalizedValue;
+            return;
         }
+
+        // 滑块或预设改动目标位置时把文本同步过去；用户正在输入且文本已是同一数值时不打断。
+        if (!TryParseTargetPositionText(TargetPositionText, out var textValue) || textValue != value)
+        {
+            TargetPositionText = value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        OnPropertyChanged(nameof(TargetPositionSliderValue));
+    }
+
+    private static bool TryParseTargetPositionText(string? text, out int position)
+    {
+        position = 0;
+        var trimmed = text?.Trim();
+        if (string.IsNullOrEmpty(trimmed)
+            || !long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            || parsed < 0
+            || parsed > MaxTargetPositionSteps)
+        {
+            return false;
+        }
+
+        position = (int)parsed;
+        return true;
+    }
+
+    private static string DescribeTargetPositionInputError(string? text)
+    {
+        var trimmed = text?.Trim() ?? string.Empty;
+        if (trimmed.Length == 0)
+        {
+            return "请先输入目标位置（0～65535 step）。";
+        }
+
+        if (!long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            // 位数多到 long 都装不下时同样是"太大"，不用报成无法识别。
+            return trimmed.All(char.IsDigit)
+                ? $"目标位置 {trimmed} 超过 16 bit 上限 {MaxTargetPositionSteps} step，未下发。"
+                : $"目标位置需为 0～65535 的整数，当前“{trimmed}”无法识别，未下发。";
+        }
+
+        return parsed < 0
+            ? $"目标位置不能为负数（当前 {parsed}），未下发。"
+            : $"目标位置 {parsed} 超过 16 bit 上限 {MaxTargetPositionSteps} step，未下发。";
+    }
+
+    private void NotifySliderRangeChanged()
+    {
+        OnPropertyChanged(nameof(SliderMaximumSteps));
+        OnPropertyChanged(nameof(SliderMinimumSteps));
+        OnPropertyChanged(nameof(TargetPositionSliderValue));
     }
 
     private IEnumerable<MotorPresetViewModel> CreatePresetViewModels(
@@ -727,6 +861,6 @@ public partial class ActuatorDebugViewModel : ObservableObject
             defaultPreset.Id,
             PresetDisplayNames[defaultPreset.Id],
             positionsById.GetValueOrDefault(defaultPreset.Id, defaultPreset.PositionSteps),
-            TotalTravelSteps));
+            MaxTargetPositionSteps));
     }
 }

@@ -8,7 +8,8 @@
                  xmlns:views="clr-namespace:WpfApp1.Views"
                  xmlns:local="clr-namespace:WpfApp1"
                  mc:Ignorable="d"
-                 Title="Holychip Motor Studio"
+                 Title="HolyChip Motor Studio"
+                 TitleCharacterCasing="Normal"
                  Height="450"
                  Width="800"
                  WindowState="Maximized">
@@ -149,7 +150,8 @@
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center" />
                                             <TextBox Grid.Column="1"
-                                                     Text="{Binding PositionSteps, UpdateSourceTrigger=PropertyChanged}"
+                                                     Text="{Binding PositionText, UpdateSourceTrigger=PropertyChanged}"
+                                                     ToolTip="可输入 0～65535 step；超过 16 bit 上限时无法保存"
                                                      VerticalContentAlignment="Center"
                                                      mah:ControlsHelper.CornerRadius="6" />
                                             <TextBlock Grid.Column="2" Text="step" Margin="6,0,0,0" VerticalAlignment="Center" Foreground="#6B6B6B" FontSize="12" />

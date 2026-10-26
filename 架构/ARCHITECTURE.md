@@ -1,4 +1,4 @@
-# WpfApp1（Holychip Motor Studio）架构文档
+# WpfApp1（HolyChip Motor Studio）架构文档
 
 - 文档日期：2026-10-20，2026-10-21 增补
 - 2026-10-21 文档补充：诊断前“应用待回复标志 + 从触发起最多等待 100 ms”的收尾策略已接入 `LinBusScheduler`，见第 6.2 节及诊断架构讨论记录第 19 节。
@@ -233,7 +233,7 @@ MainWindow
 
 ```text
 WpfApp1/
-├─ App.xaml(.cs)              Application 定义（无启动逻辑、无全局异常处理）
+├─ App.xaml(.cs)              Application 定义；挂全局未处理异常兜底（界面线程/任务/AppDomain → CrashLog 落盘后继续运行）
 ├─ MainWindow.xaml(.cs)       MetroWindow 外壳；导航、两个 Flyout、状态栏；
 │                             code-behind 仅处理菜单动画与报文窗口打开
 ├─ Models/                    纯数据：帧定义、诊断契约、状态快照、日志条目
@@ -251,7 +251,7 @@ WpfApp1/
 | `Services/DiagnosticTransactionService.cs` | 2420 | 诊断事务协调层（最复杂，改动风险最高；含 OTA 独占保持、负响应分类与 NRC 78 续期） |
 | `Services/LinBusScheduler.cs` | 948 | 统一发送调度器（含诊断前应用回复收尾、3D 轮询截止续期、应用帧测试开关） |
 | `ViewModels/ProtocolLogWindowViewModel.cs` | 676 | 报文窗口筛选/暂停/镜像集合/保存数据 |
-| `ViewModels/ActuatorDebugViewModel.cs` | 732 | 执行器调试页全部交互 |
+| `ViewModels/ActuatorDebugViewModel.cs` | 866 | 执行器调试页全部交互（含目标位置输入上限与滑块范围解耦） |
 | `Services/SerialPortConnectionService.cs` | 509 | 串口连接 + 双队列 |
 | `Services/LinTransportProtocol.cs` | 362 | LIN-TP 编解码与重组状态机 |
 | `ViewModels/SerialSettingsViewModel.cs` | 339 | 串口设置与端口监测（两页共用） |
@@ -619,7 +619,7 @@ OTA 第十五步的复位业务层，与校验服务同层同位：
 - 页面切换只换 `ContentControl.Content`，VM 与通信服务都是常驻实例：**串口连接、应用帧调度、诊断独占不因切页而重置或停止**。新增页面只需再加一个 `MenuItemViewModel` 与一条 `DataTemplate`。
 - `HandleStatusFrameReceived`：按 ID 分发 `0x33` / `0x34` → 解析 → `Dispatcher.BeginInvoke` 回 UI → `ApplyMotorStatus` / `ApplyMotorMeasurements`。**唯一把通信线程数据搬到 UI 的位置。**
 
-#### 4.5.2 `ActuatorDebugViewModel`（732 行）+ `ActuatorDebugView.xaml`
+#### 4.5.2 `ActuatorDebugViewModel`（866 行）+ `ActuatorDebugView.xaml`
 
 承载了执行器调试页的全部交互（页面偏"重"，见第 7 节）：
 
@@ -627,9 +627,11 @@ OTA 第十五步的复位业务层，与校验服务同层同位：
 | --- | --- |
 | 版本读取 | `ReadDeviceInfoCommand(string operationName)`，按**中文按钮文字**映射 `DeviceVersionKind` |
 | 电机命令 | 确定位置/CLOSE/OPEN1-3/初始化/STOP → 改 `MotorCommandService` 快照 + 提示条 |
-| 位置钳制 | `NegativeLimitSteps`、`TotalTravelSteps` 变化时 `Math.Clamp(TargetPositionSteps, ...)`；负极限 > 正极限时以较大值为上限 |
+| 目标位置输入 | 输入框绑 `TargetPositionText`（原始文本），只受 16 bit 协议上限约束（`MaxTargetPositionSteps = 65535`）；设备回报的行程不参与钳制用户输入，超出行程只在下发提示里注明。超过 65535 或非数字的输入原样保留、`确定` 时提示原因并拒绝下发（不截断成 65535，也不让 `(ushort)` 强转回绕） |
+| 滑块范围 | `SliderMinimumSteps` / `SliderMaximumSteps` 由 `NegativeLimitSteps` / `TotalTravelSteps` 规范化而来（恒满足 min ≤ max、长度 ≥ 1）；滑块值走独立属性 `TargetPositionSliderValue`，只把目标位置收敛到滑块范围用于显示，**不回写**目标位置——避免大步数被滑块吞掉，也避免 `Value > Maximum` 的中间态 |
+| 极限值容错 | `ApplyMotorStatus` 先判区间是否可用（负极限 ≤ 正极限），不可用时负极限退回 0、行程取正极限，正极限为 0 时回落到默认行程；负值补码（-224 → `0xFF20` = 65312）不会再变成非法上界 |
 | 状态显示 | `ApplyMotorStatus` 把状态位映射为文本+颜色（正常绿 `#107C10`、故障红 `#C42B1C`、运动中蓝 `#0078D4`、空闲灰 `#5C5C5C`） |
-| 预设配置 | `Presets`（展示）/`EditablePresets`（编辑副本）/保存/记忆当前位置 |
+| 预设配置 | `Presets`（展示）/`EditablePresets`（编辑副本）/保存/记忆当前位置；预设位置绑 `MotorPresetViewModel.PositionText`，按 16 bit 协议上限校验（不再受设备行程读数影响），非法输入在保存时逐项提示并阻止写入 |
 | 按钮可用性 | `SerialSettings.IsConnected && !isDiagnosticActive`；连接状态变化与诊断活动变化都显式 `NotifyCanExecuteChanged()`（Toolkit 对属性型 CanExecute 不自动接线） |
 | 提示条 | `CancellationTokenSource` + `Task.Delay` 自动隐藏（1 s / 3 s） |
 
@@ -1004,11 +1006,11 @@ PID 计算：`P0 = ID0^ID1^ID2^ID4`，`P1 = ~(ID1^ID3^ID4^ID5)`，`PID = ID | P0
 
 建议：抽 `DeviceProfile`（或 `appsettings.json` / `config/device-profile.json`）统一承载时序与限额，`DiagnosticTiming`/`DiagnosticSendTiming` 由配置构造。
 
-**（9）无持久化日志、无全局异常处理**
+**（9）无持久化日志（全局异常兜底已于 2026-10-26 补上）**
 
-`App.xaml.cs` 是空的；异常多数被 `catch { Debug.WriteLine }` 吞掉（Release 下不可见）。现场问题只能靠报文窗口（内存、重启即失）。而"发送失败""调度异常"这类信息恰恰最需要留痕。
+`App.OnStartup` 现在挂了 `DispatcherUnhandledException` / `AppDomain.UnhandledException` / `TaskScheduler.UnobservedTaskException`，统一写入 `%LOCALAPPDATA%\HolyChipMotorStudio\logs\crash-yyyyMMdd.log`（`Services/CrashLog.cs`，写日志自身全兜底）；界面线程异常记录后进程继续运行，且只弹一次提示。仍未解决的是**常规运行日志**：业务异常多数被 `catch { Debug.WriteLine }` 吞掉（Release 下不可见），现场只能靠报文窗口（内存、重启即失）。
 
-建议：引入 Serilog（或轻量文件日志），在 `App` 挂 `DispatcherUnhandledException` / `AppDomain.UnhandledException` / `TaskScheduler.UnobservedTaskException`；把 `Debug.WriteLine` 换成结构化日志并保留级别。
+建议：引入 Serilog（或轻量文件日志）承载常规日志与 `Debug.WriteLine`，保留级别；`CrashLog` 只负责未处理异常这一类。
 
 **（10）接口不足导致可测性差**
 
