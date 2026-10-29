@@ -67,6 +67,15 @@ public partial class FirmwareUpgradeViewModel : ObservableObject
 
     public ObservableCollection<FirmwareLogEntry> FirmwareLogs { get; }
 
+    /// <summary>
+    /// 请求日志面板重新回到"跟随最新"：打开新固件、开始新一轮 OTA 时触发，
+    /// 让用户即使之前在翻阅历史，也能直接看到新日志。
+    /// 只影响视口是否跟随，不冻结、不清空任何条目；清空日志走集合 Reset 通知。
+    /// </summary>
+    public event EventHandler? LogFollowRequested;
+
+    private void RequestLogFollow() => LogFollowRequested?.Invoke(this, EventArgs.Empty);
+
     // —— 文件信息条 ——
 
     [ObservableProperty]
@@ -77,7 +86,7 @@ public partial class FirmwareUpgradeViewModel : ObservableObject
     private string filePath = string.Empty;
 
     [ObservableProperty]
-    private string fileTypeCaption = "BIN / HEX 固件文件";
+    private string fileTypeCaption = " HEX 固件文件";
 
     /// <summary>文件图标框内的短标签（BIN / HEX），未加载时显示 FILE。</summary>
     [ObservableProperty]
@@ -192,6 +201,9 @@ public partial class FirmwareUpgradeViewModel : ObservableObject
 
     private async Task LoadFirmwareAsync(string path)
     {
+        // 新一轮文件打开：即使此前在翻阅历史日志，也把视口交还给最新一行。
+        RequestLogFollow();
+
         IsFirmwareLoaded = false;
         HexPreviewLines = null;
         HasPreviewContent = false;
@@ -270,7 +282,7 @@ public partial class FirmwareUpgradeViewModel : ObservableObject
         currentImage = null;
         FileName = "尚未选择文件";
         FilePath = string.Empty;
-        FileTypeCaption = "BIN / HEX 固件文件";
+        FileTypeCaption = " HEX 固件文件";
         FileGlyph = "FILE";
         IsFirmwareLoaded = false;
         FormatText = "—";
@@ -415,6 +427,9 @@ public partial class FirmwareUpgradeViewModel : ObservableObject
         {
             return;
         }
+
+        // 新一轮升级：交还视口，保证"开始 OTA"后的过程日志立刻可见。
+        RequestLogFollow();
 
         // 擦除/下载/校验范围来自加载时的固件映像快照；界面标志与映像必须同时有效，
         // 避免用空映像进入第十步或第十一步。

@@ -99,7 +99,7 @@
                         <ColumnDefinition Width="8" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="选择固件文件，查看 HEX / BIN 原始数据" FontFamily="Microsoft YaHei UI" FontSize="12" Foreground="#777777" VerticalAlignment="Center" />
+                    <TextBlock Text="选择固件文件，查看 HEX  原始数据" FontFamily="Microsoft YaHei UI" FontSize="12" Foreground="#777777" VerticalAlignment="Center" />
                     <Button Grid.Column="1" Content="打开固件文件" Command="{Binding OpenFirmwareCommand}" Style="{StaticResource PrimaryButtonStyle}" MinWidth="130" />
                     <Button Grid.Column="3" Content="文件内容" Command="{Binding ShowContentCommand}" Style="{StaticResource ActionButtonStyle}" MinWidth="100" ToolTip="在独立窗口查看固件十六进制内容" />
                 </Grid>
@@ -183,7 +183,9 @@
                         </Border>
 
                         <Border Grid.Row="2" Background="#252A30">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="10,8,12,8">
+                            <!-- 自动跟随最新行：新日志追加时滚到底，用户上滚离开底部即暂停，
+                                 代码在 FirmwareUpgradeView.xaml.cs（与报文窗口同一套判定）。 -->
+                            <ScrollViewer x:Name="LogScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="10,8,12,8">
                                 <ItemsControl ItemsSource="{Binding FirmwareLogs}" ItemTemplate="{StaticResource FirmwareLogEntryTemplate}" />
                             </ScrollViewer>
                         </Border>
